@@ -20,6 +20,7 @@ RUN apt-get update && apt-get install -y \
     libatk-bridge2.0-0 \
     libxcomposite1 \
     libxdamage1 \
+    libxfixes3 \
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
