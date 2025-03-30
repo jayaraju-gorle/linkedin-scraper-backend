@@ -30,28 +30,16 @@ RUN apt-get update && apt-get install -y \
     libglib2.0-0 \
     libxss1 \
     libxfixes3 \
-    alsa-lib \
-    atk \
-    at-spi2-atk \
-    cups-libs \
-    dbus-libs \
-    expat \
-    fontconfig \
-    freetype \
-    gcc-c++ \
-    glib2 \
-    glibc \
-    gtk3 \
-    libX11 \
-    libXScrnSaver \
-    libXcursor \
-    libXrender \
-    libgcc \
-    libstdc++ \
-    libxcb \
-    pango \
+    libxcb1 \
+    libgcc1 \
+    libxrender1 \
+    libxcursor1 \
+    libx11-6 \
+    libgtk-3-0 \
+    g++ \
+    libfreetype6 \
+    libdbus-1-3 \
     wget \
-    xdg-utils \
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
