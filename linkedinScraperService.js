@@ -29,7 +29,7 @@ async function setCookies(page, cookiesString) {
 
 async function performPeopleSearch(page, searchUrl, maxPages) {
     let allResults = [];
-    const numPages = maxPages === undefined ? 5 : maxPages; // Use default if undefined
+    const numPages = maxPages === undefined ? 50 : maxPages; // Use default if undefined, changed to 50
     for (let currentPage = 1; currentPage <= numPages; currentPage++) {
         const pageUrl = currentPage === 1 ? searchUrl : `${searchUrl}&page=${currentPage}`;
         try {
