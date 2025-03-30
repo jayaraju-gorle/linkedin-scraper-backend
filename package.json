@@ -1,0 +1,26 @@
+{
+  "name": "linkedin-scraper-backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jayaraju-gorle/linkedin-scraper-backend.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/jayaraju-gorle/linkedin-scraper-backend/issues"
+  },
+  "homepage": "https://github.com/jayaraju-gorle/linkedin-scraper-backend#readme",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "puppeteer": "^24.4.0"
+  }
+}
