@@ -1,0 +1,33 @@
+steps:
+  # Build the container image
+  - name: 'gcr.io/cloud-builders/docker'
+    id: Build
+    args:
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/linkedin-scraper-image:$COMMIT_SHA'
+      - '.'
+  # Push the container image to Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    id: Push
+    args:
+      - 'push'
+      - 'gcr.io/$PROJECT_ID/linkedin-scraper-image:$COMMIT_SHA'
+  # Deploy image to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: Deploy
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - '${_SERVICE_NAME}'
+      - '--image'
+      - 'gcr.io/$PROJECT_ID/linkedin-scraper-image:$COMMIT_SHA'
+      - '--region'
+      - '${_REGION}'
+      - '--allow-unauthenticated'
+      - '--memory=1Gi'
+      - '--update-env-vars'
+      - 'LINKEDIN_COOKIES=${LINKEDIN_COOKIES}'
+images:
+  - 'gcr.io/$PROJECT_ID/linkedin-scraper-image:$COMMIT_SHA'
