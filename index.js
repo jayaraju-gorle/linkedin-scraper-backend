@@ -39,7 +39,7 @@ app.get('/api/linkedin-search', async (req, res) => {
 });
 
 app.get('/api', (req, res) => {
-    res.send('Server is up and running');
+    res.send('Hi, server is up and running');
 });
 
 app.listen(port, () => {
