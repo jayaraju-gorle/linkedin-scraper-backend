@@ -7,6 +7,15 @@ WORKDIR /app
 # Copy package.json and package-lock.json to the working directory
 COPY package*.json ./
 
+# Install dependencies for Chromium
+RUN apt-get update && apt-get install -y \
+    libglib2.0-0 \
+    libnss3 \
+    libgconf-2-4 \
+    libfontconfig1 \
+    --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install dependencies
 RUN npm install
 
