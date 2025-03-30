@@ -13,6 +13,10 @@ RUN apt-get update && apt-get install -y \
     libnss3 \
     libgconf-2-4 \
     libfontconfig1 \
+    libatk1.0-0 \ # Install libatk-1.0.so.0
+    libcups2 \ # Install libcups2
+    libxss1 \ # Install libxss1
+    libasound2 \ # Install libasound2
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
