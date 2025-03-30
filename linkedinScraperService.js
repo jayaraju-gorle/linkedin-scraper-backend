@@ -92,7 +92,19 @@ async function extractSearchResults(page) {
 }
 
 async function searchLinkedInPeople(searchUrl, cookiesString, maxPages) {
-    const browser = await puppeteer.launch({ headless: "new" });
+    const browser = await puppeteer.launch({
+        headless: "new",
+        args: [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-accelerated-2d-canvas",
+            "--no-first-run",
+            "--no-zygote",
+            "--single-process", // <- This one might help
+            "--disable-gpu"
+        ],
+    });
     const page = await browser.newPage();
     try {
         await setCookies(page, cookiesString);
