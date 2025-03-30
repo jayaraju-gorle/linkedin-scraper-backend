@@ -8,25 +8,26 @@ const port = process.env.PORT || 3001; // Use the PORT environment variable or d
 app.use(cors());
 
 app.get('/api/linkedin-search', async (req, res) => {
-    const searchTerm = req.query.q;
-    const cookiesString = req.query.cookies; // Get cookies from query parameter
+    let searchTerm = req.query.q;
+    let cookiesString = req.query.cookies; // Get cookies from query parameter
     let maxPages = parseInt(req.query.maxPages);
 
     if (isNaN(maxPages)) {
         maxPages = undefined; // Set to undefined if NaN
     }
 
-    const searchUrl = req.query.searchUrl;
+    let searchUrl = req.query.searchUrl;
 
     if (!cookiesString) {
         return res.status(400).json({ error: 'LinkedIn cookies are required' });
     }
+    cookiesString = decodeURIComponent(cookiesString); // Decode the cookies string
 
     let finalSearchUrl;
     if (searchUrl) {
-        finalSearchUrl = searchUrl;
+        finalSearchUrl = decodeURIComponent(searchUrl); // Decode the URL
     } else if (searchTerm) {
-        finalSearchUrl = `${DEFAULT_SEARCH_URL}?keywords=${encodeURIComponent(searchTerm)}`;
+        finalSearchUrl = `${DEFAULT_SEARCH_URL}?keywords=${encodeURIComponent(searchTerm)}`; // Encode the search term
     } else {
         return res.status(400).json({ error: 'Either searchUrl or searchTerm is required' });
     }
