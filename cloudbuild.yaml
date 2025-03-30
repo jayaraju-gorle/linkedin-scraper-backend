@@ -29,5 +29,7 @@ steps:
       - '--memory=1Gi'
       - '--update-env-vars'
       - 'LINKEDIN_COOKIES=${LINKEDIN_COOKIES}'
+      - '--port'
+      - '3001'
 images:
   - 'gcr.io/$PROJECT_ID/linkedin-scraper-image:$COMMIT_SHA'
