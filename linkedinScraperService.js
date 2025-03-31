@@ -478,7 +478,18 @@ async function debugPageContent(page, label) {
 
 // Helper function to send profile data to client through emitter
 function sendToClient(emitter, data) {
-    emitter.emit('profile', data);
+    // Send the profile data in a 'profile' event
+    emitter.emit('profile', data.data.profile);
+    
+    // Send the progress information in a separate 'progress' event
+    emitter.emit('progress', { 
+        status: 'extracting_progress', 
+        message: `Extracted profile: ${data.data.profile.name} (${data.data.profilesScraped}/${data.data.totalProfiles}) - ${data.data.progress}%`,
+        progress: data.data.progress,
+        profilesScraped: data.data.profilesScraped,
+        totalProfiles: data.data.totalProfiles,
+        currentProfile: data.data.profile.name
+    });
 }
 
 async function performPeopleSearch(page, searchUrl, maxPages, emitter) {
