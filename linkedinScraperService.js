@@ -145,213 +145,340 @@ async function validateSession(page, emitter) {
     }
 }
 
-// Take a screenshot and log page content for debugging
-async function debugPageContent(page, label = "debug") {
+async function extractProfileData(page, onProfileExtracted, options = {}) {
     try {
-        console.log(`---DEBUG ${label}---`);
+        // Set defaults
+        const settings = {
+            maxPages: 100,  // Default max pages to scrape
+            currentPage: 1, // Current page being processed
+            resultsPerPage: 10, // LinkedIn shows 10 results per page
+            ...options
+        };
         
-        // Save screenshot for visual debugging
-        const screenshotPath = `./debug-${label}-${Date.now()}.png`;
-        await page.screenshot({ path: screenshotPath, fullPage: true });
-        console.log(`Screenshot saved to ${screenshotPath}`);
+        // Wait for search results to load
+        await page.waitForSelector('div[data-chameleon-result-urn], .search-results-container', { timeout: 10000 })
+            .catch(() => console.log('Search results container not found, continuing anyway'));
+            
+        // First, determine the total number of search results
+        const totalResultsInfo = await getTotalSearchResultsInfo(page);
+        console.log(`Total search results: ${totalResultsInfo.totalResults}`);
         
-        // Log page title and URL
-        const title = await page.title();
-        const url = page.url();
-        console.log(`Page title: ${title}`);
-        console.log(`Page URL: ${url}`);
+        // Calculate total profiles to extract based on available results and max pages
+        const totalProfilesToExtract = calculateTotalProfilesToExtract(
+            totalResultsInfo.totalResults,
+            settings.maxPages,
+            settings.resultsPerPage
+        );
         
-        // Log HTML structure to see what selectors we need
-        const bodyHTML = await page.evaluate(() => {
-            return document.body.innerHTML.substring(0, 1000); // First 1000 chars to avoid huge logs
-        });
-        console.log("Page HTML snippet:");
-        console.log(bodyHTML);
+        // Scroll to load all results on current page
+        await autoScroll(page);
         
-        // Check for common elements
-        const commonSelectors = [
-            '.search-results-container',
-            '.reusable-search__result-container',
-            '.entity-result__item',
-            '.search-results',
-            '.search-results__cluster',
-            // Add newer possible selectors here
-            '.scaffold-layout__list',
-            '.artdeco-list',
-            '.artdeco-list__item',
-            '.search-reusables__result-container'
-        ];
-        
-        const foundSelectors = await page.evaluate((selectors) => {
-            return selectors.map(selector => {
-                const elements = document.querySelectorAll(selector);
-                return {
-                    selector,
-                    count: elements.length,
-                    exists: elements.length > 0
-                };
-            });
-        }, commonSelectors);
-        
-        console.log("Found elements:");
-        console.log(foundSelectors);
-        console.log(`---END DEBUG ${label}---`);
-    } catch (e) {
-        console.error("Error during debugging:", e);
-    }
-}
-
-async function extractProfileData(page) {
-    try {
-        // Debug the page content to see what's happening
-        await debugPageContent(page, "before-extraction");
-        
-        // Wait a bit more to ensure all content is loaded
-        await delay(2000);
-        
-        return await page.evaluate(() => {
+        // Extract profiles
+        const extractedProfiles = await page.evaluate(async () => {
             const profiles = [];
             
-            // Try multiple potential selectors for search results
-            // LinkedIn occasionally changes their HTML structure
+            // Updated selectors including the new one from the sample HTML
             const selectors = [
-                '.reusable-search__result-container',
+                'li.AdHMbgDGIMDafLgUlAYlroYNrSpshgCHY',  
+                'div[data-chameleon-result-urn]',
+                'li.reusable-search__result-container',
                 '.entity-result',
-                '.search-results__list .search-result',
-                '.scaffold-layout__list-item',
-                '.artdeco-list__item', 
-                '.search-reusables__result-container',
-                // Add more selectors as LinkedIn updates their structure
-                '[data-chameleon-result-urn]'
+                '.scaffold-layout__list-item'
             ];
             
-            // Try each selector until we find results
+            // Find results using the selectors
             let results = [];
             for (const selector of selectors) {
                 results = document.querySelectorAll(selector);
-                if (results.length > 0) {
-                    console.log(`Found ${results.length} results with selector: ${selector}`);
-                    break;
-                }
+                if (results.length > 0) break;
             }
             
-            // Detect "no results" message with multiple possible selectors
-            const noResultsSelectors = [
-                '.search-reusables__no-results-message',
-                '.search-no-results',
-                '.artdeco-empty-state',
-                '.search-results--empty'
-            ];
-            
-            let noResultsFound = false;
-            let noResultsMessage = '';
-            
-            for (const selector of noResultsSelectors) {
-                const element = document.querySelector(selector);
-                if (element) {
-                    noResultsFound = true;
-                    noResultsMessage = element.textContent.trim();
-                    break;
-                }
-            }
-            
-            // If we didn't find any results using our selectors and have no explicit "no results" message,
-            // check if there's any indication this is a search results page
-            if (results.length === 0 && !noResultsFound) {
-                // Check if we're on the right page
-                const isSearchPage = !!document.querySelector('.search-results-container') || 
-                                      !!document.querySelector('.search-results') ||
-                                      !!document.querySelector('.search-reusables');
-                
-                if (!isSearchPage) {
-                    return {
-                        profiles: [],
-                        message: 'Not on a LinkedIn search results page. LinkedIn may have redirected.',
-                        hasNoResults: true
-                    };
-                }
-            }
-            
-            // If no results found, return accordingly
-            if (results.length === 0 || noResultsFound) {
-                return {
-                    profiles: [],
-                    message: noResultsMessage || 'No search results found',
-                    hasNoResults: true
-                };
-            }
-            
-            // Extract data from each result
-            results.forEach(result => {
+            // Process results one by one
+            Array.from(results).forEach(result => {
                 try {
-                    // Try multiple selectors for each piece of information
+                    // Name selectors
                     const nameSelectors = [
+                        '.mkMastUmWkELhAcaaNYzKMdrjlCmJXnYgZE',
                         '.entity-result__title-text a',
-                        '.actor-name a',
-                        '.search-result__result-title a',
-                        '.artdeco-entity-lockup__title a',
                         '.app-aware-link[data-field="name"]'
                     ];
                     
+                    // Title selectors
                     const titleSelectors = [
-                        '.entity-result__primary-subtitle',
-                        '.search-result__truncate',
-                        '.artdeco-entity-lockup__subtitle',
-                        'div[data-field="headline"]'
+                        '.mTjnOwtMxHPffEIRcJLDWXTPzwQcTgTqrfveo',
+                        '.entity-result__primary-subtitle'
                     ];
                     
+                    // Location selectors
                     const locationSelectors = [
-                        '.entity-result__secondary-subtitle',
-                        '.search-result__location',
-                        '.artdeco-entity-lockup__caption',
-                        'div[data-field="location"]'
+                        '.bPSmFcwecOKZVgXSLAwwTDITpxNrJUrPIOE',
+                        '.entity-result__secondary-subtitle'
                     ];
                     
-                    // Function to try multiple selectors
-                    const findElement = (parent, selectors) => {
+                    // URL selectors
+                    const urlSelectors = [
+                        'a.dgePcUVTyZcmWIuOySyndWdGoBMukAZsio',
+                        '.entity-result__title-text a'
+                    ];
+                    
+                    // Extract text/URL helper functions
+                    const getText = (parent, selectors) => {
                         for (const selector of selectors) {
                             const element = parent.querySelector(selector);
-                            if (element) return element;
+                            if (element) return element.textContent.trim();
                         }
-                        return null;
+                        return '';
                     };
                     
-                    const nameElement = findElement(result, nameSelectors);
-                    const titleElement = findElement(result, titleSelectors);
-                    const locationElement = findElement(result, locationSelectors);
+                    const getUrl = (parent, selectors) => {
+                        for (const selector of selectors) {
+                            const element = parent.querySelector(selector);
+                            if (element && element.href) return element.href.split('?')[0];
+                        }
+                        
+                        // Fallback: look for any anchor with '/in/' in href
+                        const allAnchors = parent.querySelectorAll('a');
+                        for (const a of allAnchors) {
+                            if (a.href && a.href.includes('/in/')) {
+                                return a.href.split('?')[0];
+                            }
+                        }
+                        return '';
+                    };
                     
-                    // Skip this result if we can't find a name
-                    if (!nameElement) return;
-                    
-                    const profileUrl = nameElement?.href?.split('?')[0] || '';
-                    const name = nameElement?.textContent?.trim() || '';
-                    const title = titleElement?.textContent?.trim() || '';
-                    const location = locationElement?.textContent?.trim() || '';
+                    // Extract raw data
+                    let rawName = getText(result, nameSelectors);
+                    const title = getText(result, titleSelectors);
+                    const location = getText(result, locationSelectors);
+                    const profileUrl = getUrl(result, urlSelectors);
                     const linkedinId = profileUrl.split('/in/')[1] || '';
                     
-                    if (name) {
-                        profiles.push({
-                            name,
-                            title,
-                            location,
-                            profileUrl,
-                            linkedinId
-                        });
+                    // Only process if we have a name
+                    if (rawName) {
+                        // Extract connection degree
+                        let connectionDegree = null;
+                        const degreeMatch = rawName.match(/(\d)(?:st|nd|rd|th)\+?\s+degree\s+connection/i);
+                        if (degreeMatch) {
+                            connectionDegree = degreeMatch[0].trim();
+                        }
+                        
+                        // Clean the name
+                        let name = rawName;
+                        
+                        // Remove "View [name]'s profile"
+                        if (name.includes("View")) {
+                            name = name.split("View")[0].trim();
+                        }
+                        
+                        // Remove connection degree from name
+                        if (connectionDegree) {
+                            name = name.replace(`• ${connectionDegree}`, '')
+                                        .replace(connectionDegree, '').trim();
+                        }
+                        
+                        // Clean up all newlines and extra spaces
+                        name = name.replace(/\n/g, ' ')
+                                    .replace(/\s+/g, ' ')
+                                    .replace(/•.*$/, '') // Remove anything after bullet point
+                                    .trim();
+                        
+                        // Only add the profile if we have valid data
+                        if (name) {
+                            profiles.push({
+                                name,
+                                title,
+                                location,
+                                profileUrl,
+                                linkedinId,
+                                connectionDegree: connectionDegree || null
+                            });
+                        }
                     }
                 } catch (e) {
                     console.error('Error parsing profile:', e);
                 }
             });
             
+            return profiles;
+        });
+        
+        console.log(`Extracted ${extractedProfiles.length} profiles from page ${settings.currentPage}`);
+        
+        // Stream profiles to client as they're processed
+        for (let i = 0; i < extractedProfiles.length; i++) {
+            const profile = extractedProfiles[i];
+            
+            // Calculate how many profiles we've processed so far
+            const profilesScraped = (settings.currentPage - 1) * settings.resultsPerPage + (i + 1);
+            
+            // Calculate progress percentage
+            const progress = Math.min(100, Math.floor(100 * profilesScraped / totalProfilesToExtract));
+            
+            // Stream the profile to the client with progress information
+            if (onProfileExtracted) {
+                onProfileExtracted({
+                    profile,
+                    progress,
+                    totalProfiles: totalProfilesToExtract,
+                    profilesScraped,
+                    totalAvailable: totalResultsInfo.totalResults
+                });
+            }
+            
+            // Optional small delay between profile emissions to prevent overwhelming the client
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        
+        return {
+            profiles: extractedProfiles,
+            hasNoResults: extractedProfiles.length === 0,
+            totalResults: totalResultsInfo.totalResults,
+            progress: Math.min(100, Math.floor(100 * settings.currentPage * settings.resultsPerPage / totalProfilesToExtract))
+        };
+    } catch (error) {
+        console.error("Error extracting profile data:", error);
+        return { profiles: [], error: error.message, hasNoResults: true };
+    }
+}
+
+// Helper function to get total search results info
+async function getTotalSearchResultsInfo(page) {
+    try {
+        return await page.evaluate(() => {
+            // Target the specific div containing the results count
+            const resultsCountDiv = document.querySelector('div[id="MxSzfgMARBWJrAnGrYlV6w=="] h2.t-14');
+            
+            // Also try alternative selectors in case LinkedIn changes the ID
+            const alternativeSelectors = [
+                'h2.pb2.t-black--light.t-14',
+                '.search-results__total',
+                '.pb2.t-black--light.t-14 div'
+            ];
+            
+            let resultText = '';
+            
+            // First try the exact div with ID
+            if (resultsCountDiv) {
+                resultText = resultsCountDiv.textContent.trim();
+            } else {
+                // Try alternative selectors if the specific ID isn't found
+                for (const selector of alternativeSelectors) {
+                    const elements = document.querySelectorAll(selector);
+                    for (const el of elements) {
+                        const text = el.textContent.trim();
+                        if (text.includes('result') || text.match(/\d+,?\d*/)) {
+                            resultText = text;
+                            break;
+                        }
+                    }
+                    if (resultText) break;
+                }
+            }
+            
+            // Parse the number from text like "About 13,700,000 results"
+            let totalResults = 0;
+            if (resultText) {
+                const numberMatch = resultText.match(/(?:About\s+)?([,\d]+)(?:\+)?\s+results?/i);
+                if (numberMatch) {
+                    totalResults = parseInt(numberMatch[1].replace(/,/g, ''), 10);
+                }
+            }
+            
+            // LinkedIn caps at 1000 viewable results according to their help page
+            const linkedInMaxResults = 1000;
+            
+            // If the total is more than LinkedIn's limit, cap it
+            if (totalResults > linkedInMaxResults) {
+                console.log(`LinkedIn shows ${totalResults} results but only allows viewing ${linkedInMaxResults}`);
+            }
+            
             return { 
-                profiles,
-                hasNoResults: profiles.length === 0
+                totalResults,
+                displayedTotal: totalResults,
+                actuallyAvailable: Math.min(totalResults, linkedInMaxResults)
             };
         });
     } catch (error) {
-        console.error("Error extracting profile data:", error);
-        return { profiles: [], error: error.message };
+        console.error('Error getting total search results:', error);
+        return { totalResults: 0, displayedTotal: 0, actuallyAvailable: 0 };
     }
+}
+
+// Calculate total profiles to extract based on requirements
+function calculateTotalProfilesToExtract(totalAvailable, maxPages, resultsPerPage) {
+    // LinkedIn limits to 1000 results max (100 pages)
+    const linkedInMaxResults = 1000;
+
+    // Calculate based on max pages (if specified)
+    const maxByPages = maxPages * resultsPerPage;
+
+    // Return the minimum of all constraints
+    return Math.min(
+        totalAvailable,           // Total available from search
+        maxByPages,               // Max based on page limit
+        linkedInMaxResults        // LinkedIn's hard limit
+    );
+}
+
+// Helper function to scroll and load all content
+async function autoScroll(page) {
+    await page.evaluate(async () => {
+        await new Promise((resolve) => {
+            let totalHeight = 0;
+            const distance = 300;
+            const timer = setInterval(() => {
+                window.scrollBy(0, distance);
+                totalHeight += distance;
+                
+                if (totalHeight >= document.body.scrollHeight) {
+                    clearInterval(timer);
+                    resolve();
+                }
+            }, 100);
+        });
+    });
+    await new Promise(resolve => setTimeout(resolve, 1000));
+}
+
+// Debug function to understand what's on the page
+async function debugPageContent(page, label) {
+    try {
+        // Take a screenshot
+        await page.screenshot({ path: `debug-${label}.png` });
+        
+        // Count elements matching each selector
+        const selectors = [
+            'li.AdHMbgDGIMDafLgUlAYlroYNrSpshgCHY',  // New LinkedIn structure
+            'div[data-chameleon-result-urn]',
+            '.entity-result',
+            '.reusable-search__result-container'
+        ];
+        
+        for (const selector of selectors) {
+            const count = await page.evaluate((sel) => document.querySelectorAll(sel).length, selector);
+            console.log(`Selector "${selector}" found ${count} elements`);
+        }
+        
+        // Log the HTML structure of the first result for debugging
+        await page.evaluate(() => {
+            const result = document.querySelector('div[data-chameleon-result-urn]') || 
+                           document.querySelector('.entity-result') ||
+                           document.querySelector('li.AdHMbgDGIMDafLgUlAYlroYNrSpshgCHY');
+            
+            if (result) {
+                console.log('First result HTML:', result.outerHTML);
+            } else {
+                console.log('No results found to debug');
+            }
+        });
+    } catch (error) {
+        console.error(`Error during debug (${label}):`, error);
+    }
+}
+
+// Helper function to send profile data to client through emitter
+function sendToClient(emitter, data) {
+    emitter.emit('profile', data);
 }
 
 async function performPeopleSearch(page, searchUrl, maxPages, emitter) {
@@ -436,14 +563,43 @@ async function performPeopleSearch(page, searchUrl, maxPages, emitter) {
             emitter.emit('progress', { status: 'page_loaded', message: `Page ${currentPage} loaded successfully`, page: currentPage, url: currentUrl });
             
             emitter.emit('progress', { status: 'extracting', message: `Extracting data from page ${currentPage}`, page: currentPage });
-            
-            const { profiles, hasNoResults, message } = await extractProfileData(page);
+
+            const profiles = [];
+
+            const result = await extractProfileData(
+                page, 
+                // Callback function that receives each profile as it's extracted
+                ({ profile, progress, totalProfiles, profilesScraped }) => {
+                    // Add profile to the collection
+                    profiles.push(profile);
+                    
+                    // Send profile and progress to client
+                    sendToClient(emitter, {
+                        type: 'profile',
+                        data: {
+                            profile,
+                            progress,
+                            totalProfiles,
+                            profilesScraped
+                        }
+                    });
+                    
+                    console.log(`Extracted profile: ${profile.name} (${profilesScraped}/${totalProfiles}) - ${progress}%`);
+                },
+                {
+                    maxPages: maxPages ? parseInt(maxPages) : 100,
+                    currentPage: currentPage
+                }
+            );
+
+            const hasNoResults = result.hasNoResults || profiles.length === 0;
             
             // If we have no results, we've reached the end
-            if (hasNoResults || profiles.length === 0) {
+            if (hasNoResults) {
+                const message = `No more results found after page ${currentPage-1}`;
                 emitter.emit('progress', { 
                     status: 'no_more_results', 
-                    message: message || `No more results found after page ${currentPage-1}`,
+                    message: message,
                     page: currentPage
                 });
                 break;
@@ -574,6 +730,7 @@ function searchLinkedInPeople(searchUrl, cookiesString, maxPages) {
             if (browser) {
                 try {
                     await browser.close();
+                    console.log("Browser closed successfully");
                 } catch (e) {
                     console.error("Error closing browser:", e);
                 }
