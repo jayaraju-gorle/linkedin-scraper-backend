@@ -36,7 +36,6 @@ async function setCookies(page, cookiesString, emitter) {
         
         // Check if we have important LinkedIn cookies
         const hasLiAt = cookies.some(c => c.name === 'li_at');
-        const hasJsessionID = cookies.some(c => c.name === 'JSESSIONID');
         
         if (!hasLiAt) {
             throw new Error('Missing required LinkedIn authentication cookie (li_at)');
@@ -146,39 +145,199 @@ async function validateSession(page, emitter) {
     }
 }
 
+// Take a screenshot and log page content for debugging
+async function debugPageContent(page, label = "debug") {
+    try {
+        console.log(`---DEBUG ${label}---`);
+        
+        // Save screenshot for visual debugging
+        const screenshotPath = `./debug-${label}-${Date.now()}.png`;
+        await page.screenshot({ path: screenshotPath, fullPage: true });
+        console.log(`Screenshot saved to ${screenshotPath}`);
+        
+        // Log page title and URL
+        const title = await page.title();
+        const url = page.url();
+        console.log(`Page title: ${title}`);
+        console.log(`Page URL: ${url}`);
+        
+        // Log HTML structure to see what selectors we need
+        const bodyHTML = await page.evaluate(() => {
+            return document.body.innerHTML.substring(0, 1000); // First 1000 chars to avoid huge logs
+        });
+        console.log("Page HTML snippet:");
+        console.log(bodyHTML);
+        
+        // Check for common elements
+        const commonSelectors = [
+            '.search-results-container',
+            '.reusable-search__result-container',
+            '.entity-result__item',
+            '.search-results',
+            '.search-results__cluster',
+            // Add newer possible selectors here
+            '.scaffold-layout__list',
+            '.artdeco-list',
+            '.artdeco-list__item',
+            '.search-reusables__result-container'
+        ];
+        
+        const foundSelectors = await page.evaluate((selectors) => {
+            return selectors.map(selector => {
+                const elements = document.querySelectorAll(selector);
+                return {
+                    selector,
+                    count: elements.length,
+                    exists: elements.length > 0
+                };
+            });
+        }, commonSelectors);
+        
+        console.log("Found elements:");
+        console.log(foundSelectors);
+        console.log(`---END DEBUG ${label}---`);
+    } catch (e) {
+        console.error("Error during debugging:", e);
+    }
+}
+
 async function extractProfileData(page) {
     try {
+        // Debug the page content to see what's happening
+        await debugPageContent(page, "before-extraction");
+        
+        // Wait a bit more to ensure all content is loaded
+        await delay(2000);
+        
         return await page.evaluate(() => {
             const profiles = [];
-            const results = document.querySelectorAll('.reusable-search__result-container');
             
-            // If no results found, check for specific messages
-            if (results.length === 0) {
-                // Check if there's a "no results" message
-                const noResultsMsg = document.querySelector('.search-reusables__no-results-message');
-                if (noResultsMsg) {
-                    return { 
+            // Try multiple potential selectors for search results
+            // LinkedIn occasionally changes their HTML structure
+            const selectors = [
+                '.reusable-search__result-container',
+                '.entity-result',
+                '.search-results__list .search-result',
+                '.scaffold-layout__list-item',
+                '.artdeco-list__item', 
+                '.search-reusables__result-container',
+                // Add more selectors as LinkedIn updates their structure
+                '[data-chameleon-result-urn]'
+            ];
+            
+            // Try each selector until we find results
+            let results = [];
+            for (const selector of selectors) {
+                results = document.querySelectorAll(selector);
+                if (results.length > 0) {
+                    console.log(`Found ${results.length} results with selector: ${selector}`);
+                    break;
+                }
+            }
+            
+            // Detect "no results" message with multiple possible selectors
+            const noResultsSelectors = [
+                '.search-reusables__no-results-message',
+                '.search-no-results',
+                '.artdeco-empty-state',
+                '.search-results--empty'
+            ];
+            
+            let noResultsFound = false;
+            let noResultsMessage = '';
+            
+            for (const selector of noResultsSelectors) {
+                const element = document.querySelector(selector);
+                if (element) {
+                    noResultsFound = true;
+                    noResultsMessage = element.textContent.trim();
+                    break;
+                }
+            }
+            
+            // If we didn't find any results using our selectors and have no explicit "no results" message,
+            // check if there's any indication this is a search results page
+            if (results.length === 0 && !noResultsFound) {
+                // Check if we're on the right page
+                const isSearchPage = !!document.querySelector('.search-results-container') || 
+                                      !!document.querySelector('.search-results') ||
+                                      !!document.querySelector('.search-reusables');
+                
+                if (!isSearchPage) {
+                    return {
                         profiles: [],
-                        message: noResultsMsg.textContent.trim(),
+                        message: 'Not on a LinkedIn search results page. LinkedIn may have redirected.',
                         hasNoResults: true
                     };
                 }
             }
             
+            // If no results found, return accordingly
+            if (results.length === 0 || noResultsFound) {
+                return {
+                    profiles: [],
+                    message: noResultsMessage || 'No search results found',
+                    hasNoResults: true
+                };
+            }
+            
+            // Extract data from each result
             results.forEach(result => {
                 try {
-                    const nameElement = result.querySelector('.entity-result__title-text a');
-                    const titleElement = result.querySelector('.entity-result__primary-subtitle');
-                    const locationElement = result.querySelector('.entity-result__secondary-subtitle');
-                    const profileUrl = nameElement?.href?.split('?')[0] || '';
+                    // Try multiple selectors for each piece of information
+                    const nameSelectors = [
+                        '.entity-result__title-text a',
+                        '.actor-name a',
+                        '.search-result__result-title a',
+                        '.artdeco-entity-lockup__title a',
+                        '.app-aware-link[data-field="name"]'
+                    ];
                     
-                    profiles.push({
-                        name: nameElement?.textContent?.trim() || '',
-                        title: titleElement?.textContent?.trim() || '',
-                        location: locationElement?.textContent?.trim() || '',
-                        profileUrl: profileUrl,
-                        linkedinId: profileUrl.split('/in/')[1] || ''
-                    });
+                    const titleSelectors = [
+                        '.entity-result__primary-subtitle',
+                        '.search-result__truncate',
+                        '.artdeco-entity-lockup__subtitle',
+                        'div[data-field="headline"]'
+                    ];
+                    
+                    const locationSelectors = [
+                        '.entity-result__secondary-subtitle',
+                        '.search-result__location',
+                        '.artdeco-entity-lockup__caption',
+                        'div[data-field="location"]'
+                    ];
+                    
+                    // Function to try multiple selectors
+                    const findElement = (parent, selectors) => {
+                        for (const selector of selectors) {
+                            const element = parent.querySelector(selector);
+                            if (element) return element;
+                        }
+                        return null;
+                    };
+                    
+                    const nameElement = findElement(result, nameSelectors);
+                    const titleElement = findElement(result, titleSelectors);
+                    const locationElement = findElement(result, locationSelectors);
+                    
+                    // Skip this result if we can't find a name
+                    if (!nameElement) return;
+                    
+                    const profileUrl = nameElement?.href?.split('?')[0] || '';
+                    const name = nameElement?.textContent?.trim() || '';
+                    const title = titleElement?.textContent?.trim() || '';
+                    const location = locationElement?.textContent?.trim() || '';
+                    const linkedinId = profileUrl.split('/in/')[1] || '';
+                    
+                    if (name) {
+                        profiles.push({
+                            name,
+                            title,
+                            location,
+                            profileUrl,
+                            linkedinId
+                        });
+                    }
                 } catch (e) {
                     console.error('Error parsing profile:', e);
                 }
@@ -186,7 +345,7 @@ async function extractProfileData(page) {
             
             return { 
                 profiles,
-                hasNoResults: false
+                hasNoResults: profiles.length === 0
             };
         });
     } catch (error) {
@@ -228,30 +387,53 @@ async function performPeopleSearch(page, searchUrl, maxPages, emitter) {
             console.log(`Navigating to: ${pageUrl}`);
             emitter.emit('progress', { status: 'navigating', message: `Navigating to page ${currentPage}`, page: currentPage });
             
-            // Use a shorter timeout and more reliable load criteria
-            await page.goto(pageUrl, { 
-                waitUntil: 'domcontentloaded', 
-                timeout: 30000 
-            });
+            // CHANGED: More resilient page navigation approach
+            try {
+                // First try with a shorter timeout and domcontentloaded
+                await page.goto(pageUrl, { 
+                    waitUntil: 'domcontentloaded',
+                    timeout: 25000 
+                });
+            } catch (navError) {
+                console.log('Initial navigation timed out, checking if page loaded anyway...');
+                // Even if timeout occurred, the page might have loaded enough to work with
+                const url = page.url();
+                
+                if (url.includes('/login') || url.includes('/checkpoint')) {
+                    throw new Error('LinkedIn session expired. Please provide new cookies.');
+                }
+                
+                if (!url.includes('linkedin.com/search')) {
+                    throw new Error(`Navigation failed, redirected to: ${url}`);
+                }
+                
+                // If we're still on LinkedIn and on a search page, continue
+                console.log('Still on LinkedIn search page, continuing despite timeout');
+            }
             
-            // Wait for search results or error message with a shorter timeout
-            await Promise.race([
-                page.waitForSelector('.reusable-search__result-container', { timeout: 10000 }),
-                page.waitForSelector('.search-reusables__no-results-message', { timeout: 10000 })
-            ]).catch(() => {
-                console.log('Could not find results or no-results message');
-            });
+            // Additional waiting strategies
+            try {
+                // Wait for search results container with a shorter timeout
+                await page.waitForSelector([
+                    '.search-results-container',
+                    '.reusable-search__result-container',
+                    '.search-results',
+                    '.scaffold-layout__list'
+                ].join(','), { timeout: 10000 });
+            } catch (selectorError) {
+                console.log('Search results container not found, will try direct extraction anyway');
+            }
             
-            // Check if we're redirected to login page
+            // Wait a bit for JavaScript to load more content
+            await delay(5000);
+            
+            // Check if we're redirected to login page (double check)
             const currentUrl = page.url();
             if (currentUrl.includes('/login') || currentUrl.includes('/checkpoint')) {
                 throw new Error('LinkedIn session expired. Please provide new cookies.');
             }
             
             emitter.emit('progress', { status: 'page_loaded', message: `Page ${currentPage} loaded successfully`, page: currentPage, url: currentUrl });
-
-            // Small delay to ensure page is fully rendered
-            await delay(1000);
             
             emitter.emit('progress', { status: 'extracting', message: `Extracting data from page ${currentPage}`, page: currentPage });
             
@@ -337,6 +519,11 @@ function searchLinkedInPeople(searchUrl, cookiesString, maxPages) {
             
             const page = await browser.newPage();
             
+            // ADDED: Disable JavaScript timeouts
+            const session = await page.target().createCDPSession();
+            await session.send('Emulation.setScriptExecutionDisabled', { value: false });
+            await session.send('Runtime.enable');
+            
             // Monitor for any navigation errors
             page.on('error', err=> {
                 console.error('Page error:', err);
@@ -346,20 +533,25 @@ function searchLinkedInPeople(searchUrl, cookiesString, maxPages) {
             // Set a realistic user agent
             await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
             
-            // Modify request interception to be more selective - only block unnecessary resources
+            // MODIFIED: More targeted request interception
             await page.setRequestInterception(true);
             page.on('request', (request) => {
                 const resourceType = request.resourceType();
                 const url = request.url();
                 
+                // Only block truly unnecessary resources to ensure page loads properly
                 if (
-                    // Block resource-heavy content but allow essential LinkedIn functionality
-                    (resourceType === 'image' && !url.includes('profile-displayphoto')) || 
-                    resourceType === 'media' || 
-                    resourceType === 'font' ||
-                    url.includes('ads') ||
+                    // Block heavy media files
+                    (resourceType === 'media') || 
+                    // Block analytics and tracking
+                    url.includes('analytics') ||
+                    url.includes('/li/track') ||
                     url.includes('tracking') ||
-                    url.includes('analytics')
+                    url.includes('/pixel/') ||
+                    // Block other non-essential resources
+                    url.includes('ads.linkedin.com') ||
+                    (resourceType === 'font') ||
+                    (url.endsWith('.mp4') || url.endsWith('.avi') || url.endsWith('.flv'))
                 ) {
                     request.abort();
                 } else {

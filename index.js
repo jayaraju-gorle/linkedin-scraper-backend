@@ -92,6 +92,10 @@ app.get('/api/linkedin-search', (req, res) => {
     });
 });
 
+app.get('/api', (req, res) => {
+    res.send('Hi, server is up and running');
+});
+
 app.listen(port, () => {
     console.log(`Server listening on port ${port}`);
 });
