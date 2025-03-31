@@ -21,7 +21,7 @@ app.use(cors());
 app.get('/api/linkedin-search', (req, res) => {
     const searchTerm = req.query.q;
     const cookiesString = req.query.cookies;
-    const maxPages = parseInt(req.query.maxPages) || 10;
+    const maxPages = parseInt(req.query.maxPages) || 100;
 
     if (!cookiesString) {
         return res.status(400).json({ error: 'LinkedIn cookies are required' });
