@@ -3,7 +3,7 @@ const cors = require('cors');
 const { searchLinkedInPeople } = require('./linkedinScraperService');
 
 const app = express();
-const port = 3001;
+const port = process.env.PORT || 3001; // Use the PORT environment variable or default to 3001
 
 // Add proper error handling
 process.on('uncaughtException', (err) => {
