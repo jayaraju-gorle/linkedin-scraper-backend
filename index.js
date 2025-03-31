@@ -1,58 +1,95 @@
 const express = require('express');
 const cors = require('cors');
-const { searchLinkedInPeople, DEFAULT_SEARCH_URL } = require('./linkedinScraperService');
+const { searchLinkedInPeople } = require('./linkedinScraperService');
+
 const app = express();
-//const port = 3001; // Remove the hardcoded port
-const port = process.env.PORT || 3001; // Use the PORT environment variable or default to 3001
+const port = 3001;
+
+// Add proper error handling
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+  // Keep the server running despite the error
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  // Keep the server running despite the error
+});
 
 app.use(cors());
 
-app.get('/api/linkedin-search', async (req, res) => {
-    let searchTerm = req.query.q;
-    let cookiesString = req.query.cookies; // Get cookies from query parameter
-    let maxPages = parseInt(req.query.maxPages);
-
-    if (isNaN(maxPages)) {
-        maxPages = undefined; // Set to undefined if NaN
-    }
-
-    let searchUrl = req.query.searchUrl;
+app.get('/api/linkedin-search', (req, res) => {
+    const searchTerm = req.query.q;
+    const cookiesString = req.query.cookies;
+    const maxPages = parseInt(req.query.maxPages) || 10;
 
     if (!cookiesString) {
         return res.status(400).json({ error: 'LinkedIn cookies are required' });
     }
-    cookiesString = decodeURIComponent(cookiesString); // Decode the cookies string
+    const decodedCookies = decodeURIComponent(cookiesString);
 
-    let finalSearchUrl;
+    let searchUrl = req.query.searchUrl;
+    const DEFAULT_SEARCH_URL = 'https://www.linkedin.com/search/results/people/';
     if (searchUrl) {
-        finalSearchUrl = decodeURIComponent(searchUrl); // Decode the URL
+        searchUrl = decodeURIComponent(searchUrl);
     } else if (searchTerm) {
-        finalSearchUrl = `${DEFAULT_SEARCH_URL}?keywords=${encodeURIComponent(searchTerm)}`; // Encode the search term
+        searchUrl = `${DEFAULT_SEARCH_URL}?keywords=${encodeURIComponent(searchTerm)}`;
     } else {
         return res.status(400).json({ error: 'Either searchUrl or searchTerm is required' });
     }
 
-    try {
-        const results = await searchLinkedInPeople(finalSearchUrl, cookiesString, maxPages);
-        res.json(results);
-    } catch (error) {
-        console.error("Error in API endpoint:", error);
-        if (error.message.includes("Error setting cookies")) {
-            res.status(400).json({ error: error.message });
-        } else if (error.message.includes("Search failed")) {
-            res.status(500).json({ error: error.message });
-        } else if (error.message.includes("Error in extractSearchResults")) {
-            res.status(500).json({ error: error.message });
-        } else if (error.message.includes("Error in searchLinkedInPeople")) {
-            res.status(500).json({ error: error.message });
-        } else {
-            res.status(500).json({ error: 'An error occurred during the search' });
-        }
-    }
-});
+    // Flag to track if response has been ended
+    let isResponseEnded = false;
 
-app.get('/api', (req, res) => {
-    res.send('Hi, server is up and running');
+    // Helper function to safely write to response
+    const safeWrite = (data) => {
+        if (!isResponseEnded && !res.writableEnded) {
+            res.write(data);
+        }
+    };
+
+    // Helper function to safely end response
+    const safeEnd = () => {
+        if (!isResponseEnded && !res.writableEnded) {
+            isResponseEnded = true;
+            res.end();
+        }
+    };
+
+    // Set headers for Server-Sent Events
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    
+    // Send initial message to establish connection
+    safeWrite('data: {"status":"connected","message":"SSE connection established"}\n\n');
+
+    const emitter = searchLinkedInPeople(searchUrl, decodedCookies, maxPages);
+
+    emitter.on('progress', (data) => {
+        console.log('Progress:', data);
+        safeWrite(`data: ${JSON.stringify(data)}\n\n`);
+    });
+
+    emitter.on('error', (data) => {
+        console.error('Error:', data);
+        safeWrite(`data: ${JSON.stringify(data)}\n\n`);
+        safeEnd();
+    });
+
+    emitter.on('done', (data) => {
+        console.log('Done:', data);
+        safeWrite(`data: ${JSON.stringify(data)}\n\n`);
+        safeEnd();
+    });
+
+    // Handle client disconnect
+    req.on('close', () => {
+        console.log('Client disconnected');
+        emitter.removeAllListeners();
+        safeEnd();
+    });
 });
 
 app.listen(port, () => {
