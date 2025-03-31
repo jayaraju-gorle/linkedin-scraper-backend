@@ -494,7 +494,7 @@ function sendToClient(emitter, data) {
 
 async function performPeopleSearch(page, searchUrl, maxPages, emitter) {
     let allResults = [];
-    const numPages = maxPages || 10;
+    const numPages = maxPages || 100;
 
     // Fix URL encoding issues with special characters in the URL
     try {
