@@ -154,12 +154,20 @@ async function extractProfileData(page, onProfileExtracted, options = {}) {
             resultsPerPage: 10, // LinkedIn shows 10 results per page
             ...options
         };
-        
-        // Wait for search results to load
-        await page.waitForSelector('div[data-chameleon-result-urn], .search-results-container', { timeout: 10000 })
-            .catch(() => console.log('Search results container not found, continuing anyway'));
+
+        // Wait for search results to load using multiple possible selectors
+        // Updated selectors to match LinkedIn's current HTML structure
+        await page.waitForSelector([
+            'li.eFNvtmZzTTJeAFaqYEszRmPedngAGKDE', // Current LinkedIn structure (2024)
+            'div.XbSDRFUSbGBpQPKjsigDankzSjQsnIyFKHI',
+            '.search-results-container',
+            'div[data-chameleon-result-urn]',
+            '.entity-result',
+            '.scaffold-layout__list-item'
+        ].join(','), { timeout: 15000 })
+        .catch(() => console.log('Search results container not found, continuing anyway'));
             
-        // First, determine the total number of search results
+        // Get total search results info
         const totalResultsInfo = await getTotalSearchResultsInfo(page);
         console.log(`Total search results: ${totalResultsInfo.totalResults}`);
         
@@ -170,16 +178,28 @@ async function extractProfileData(page, onProfileExtracted, options = {}) {
             settings.resultsPerPage
         );
         
+        // Add a debugging step to log the HTML of the first result for inspection
+        await page.evaluate(() => {
+            const firstResult = document.querySelector('li.eFNvtmZzTTJeAFaqYEszRmPedngAGKDE');
+            if (firstResult) {
+                console.log('First result HTML structure:', firstResult.outerHTML.substring(0, 500) + '...');
+            } else {
+                console.log('No results found with the primary selector');
+            }
+        });
+        
         // Scroll to load all results on current page
         await autoScroll(page);
         
-        // Extract profiles
+        // Extract profiles with the updated HTML structure
         const extractedProfiles = await page.evaluate(async () => {
             const profiles = [];
             
-            // Updated selectors including the new one from the sample HTML
+            // Updated selectors for 2024 LinkedIn structure
             const selectors = [
-                'li.AdHMbgDGIMDafLgUlAYlroYNrSpshgCHY',  
+                'li.eFNvtmZzTTJeAFaqYEszRmPedngAGKDE', // Primary current structure
+                'div.XbSDRFUSbGBpQPKjsigDankzSjQsnIyFKHI', // Alternative current container
+                'li.AdHMbgDGIMDafLgUlAYlroYNrSpshgCHY',  // Previous structure
                 'div[data-chameleon-result-urn]',
                 'li.reusable-search__result-container',
                 '.entity-result',
@@ -190,50 +210,98 @@ async function extractProfileData(page, onProfileExtracted, options = {}) {
             let results = [];
             for (const selector of selectors) {
                 results = document.querySelectorAll(selector);
-                if (results.length > 0) break;
+                if (results.length > 0) {
+                    console.log(`Found ${results.length} results using selector: ${selector}`);
+                    break;
+                }
             }
             
+            // If no results found, try the parent container approach
+            if (results.length === 0) {
+                console.log("No results found with direct selectors, trying parent containers");
+                const containers = document.querySelectorAll([
+                    '.search-results-container',
+                    '.scaffold-layout__list',
+                    '.search-results',
+                    'ul.mRINvsmBJFpXGsGCEXfkuAyiKqOjbhxMnshkMw'  // LinkedIn list container
+                ].join(','));
+                
+                if (containers.length > 0) {
+                    // Get the first container and look for profile items inside
+                    const container = containers[0];
+                    // Look for list items that might be profiles
+                    results = container.querySelectorAll('li');
+                    console.log(`Found ${results.length} results from container approach`);
+                }
+            }
+            
+            // Debug information
+            console.log(`Total results found: ${results.length}`);
+            
             // Process results one by one
-            Array.from(results).forEach(result => {
+            Array.from(results).forEach((result, index) => {
                 try {
-                    // Name selectors
+                    // UPDATED SELECTORS FOR 2024 LINKEDIN STRUCTURE
+                    
+                    // Name selectors - updated with current class names
                     const nameSelectors = [
-                        '.mkMastUmWkELhAcaaNYzKMdrjlCmJXnYgZE',
+                        '.DOgZOenwMQbHzVlKpcdwpsKlJNhiKoDGZrrVVbuM', // Profile link - reliable for latest structure
+                        'span.HbdewERYkXYyIwoqJHzosFORfHVGnNOktHA a', 
+                        'span.YIPpMkpvyHufpUvGlDJQcQyWbRMeLRUih a',
                         '.entity-result__title-text a',
                         '.app-aware-link[data-field="name"]'
                     ];
                     
-                    // Title selectors
+                    // Title selectors - updated with current class names
                     const titleSelectors = [
+                        'div.wtgFWgtdWSnthiUGZWskuFvgrwFWQdGNoM', // Current LinkedIn structure
                         '.mTjnOwtMxHPffEIRcJLDWXTPzwQcTgTqrfveo',
                         '.entity-result__primary-subtitle'
                     ];
                     
-                    // Location selectors
+                    // Location selectors - updated with current class names
                     const locationSelectors = [
+                        'div.IyewRhKoYbBUgqucsJrXLGsvrdIFFXZdHp', // Current LinkedIn structure
                         '.bPSmFcwecOKZVgXSLAwwTDITpxNrJUrPIOE',
                         '.entity-result__secondary-subtitle'
                     ];
                     
-                    // URL selectors
+                    // URL selectors for profile links - updated with current class names
                     const urlSelectors = [
+                        '.DOgZOenwMQbHzVlKpcdwpsKlJNhiKoDGZrrVVbuM', // Current LinkedIn link class
                         'a.dgePcUVTyZcmWIuOySyndWdGoBMukAZsio',
                         '.entity-result__title-text a'
                     ];
                     
-                    // Extract text/URL helper functions
+                    // HELPER FUNCTIONS - IMPROVED FOR ACCURACY
+                    
+                    // Function to extract text from elements matching selectors
                     const getText = (parent, selectors) => {
                         for (const selector of selectors) {
-                            const element = parent.querySelector(selector);
-                            if (element) return element.textContent.trim();
+                            const elements = parent.querySelectorAll(selector);
+                            for (const element of elements) {
+                                const text = element.textContent.trim();
+                                if (text && text !== '') return text;
+                            }
                         }
                         return '';
                     };
                     
+                    // Function to extract URLs from anchor elements
                     const getUrl = (parent, selectors) => {
+                        // First try the specific selectors
                         for (const selector of selectors) {
-                            const element = parent.querySelector(selector);
-                            if (element && element.href) return element.href.split('?')[0];
+                            const elements = parent.querySelectorAll(selector);
+                            for (const element of elements) {
+                                if (element && element.href) {
+                                    // Clean the URL by removing query parameters
+                                    const url = element.href.split('?')[0];
+                                    // Only return profile URLs
+                                    if (url.includes('/in/')) {
+                                        return url;
+                                    }
+                                }
+                            }
                         }
                         
                         // Fallback: look for any anchor with '/in/' in href
@@ -243,56 +311,79 @@ async function extractProfileData(page, onProfileExtracted, options = {}) {
                                 return a.href.split('?')[0];
                             }
                         }
+                        
+                        // If this is a headless profile, use the data-chameleon-result-urn
+                        if (parent.getAttribute('data-chameleon-result-urn')?.includes('headless')) {
+                            // For headless profiles, we can't get a real URL
+                            return 'https://www.linkedin.com/search/results/people/headless';
+                        }
+                        
                         return '';
                     };
+                    
+                    // EXTRACTION LOGIC
                     
                     // Extract raw data
                     let rawName = getText(result, nameSelectors);
                     const title = getText(result, titleSelectors);
                     const location = getText(result, locationSelectors);
                     const profileUrl = getUrl(result, urlSelectors);
-                    const linkedinId = profileUrl.split('/in/')[1] || '';
                     
-                    // Only process if we have a name
-                    if (rawName) {
-                        // Extract connection degree
-                        let connectionDegree = null;
-                        const degreeMatch = rawName.match(/(\d)(?:st|nd|rd|th)\+?\s+degree\s+connection/i);
-                        if (degreeMatch) {
-                            connectionDegree = degreeMatch[0].trim();
-                        }
-                        
-                        // Clean the name
-                        let name = rawName;
-                        
-                        // Remove "View [name]'s profile"
-                        if (name.includes("View")) {
-                            name = name.split("View")[0].trim();
-                        }
-                        
-                        // Remove connection degree from name
-                        if (connectionDegree) {
-                            name = name.replace(`• ${connectionDegree}`, '')
-                                        .replace(connectionDegree, '').trim();
-                        }
-                        
-                        // Clean up all newlines and extra spaces
+                    // Extract LinkedIn ID from profile URL
+                    const linkedinId = profileUrl.includes('/in/') ? 
+                        profileUrl.split('/in/')[1]?.split('?')[0] || '' : 
+                        'headless';
+                    
+                    // Extract connection degree
+                    let connectionDegree = null;
+                    const degreeMatch = rawName ? rawName.match(/(\d)(?:st|nd|rd|th)\+?\s+degree\s+connection/i) : null;
+                    if (degreeMatch) {
+                        connectionDegree = degreeMatch[0].trim();
+                    }
+                    
+                    // Clean the name
+                    let name = rawName;
+                    
+                    // Check for "LinkedIn Member" - common in your example
+                    if (name === 'LinkedIn Member' || !name) {
+                        // This is a private/anonymous profile
+                        // If we have a title/company, use that to make it more identifiable
+                        name = title ? `Anonymous LinkedIn Member (${title})` : 'Anonymous LinkedIn Member';
+                    }
+                    
+                    // Remove "View [name]'s profile"
+                    if (name && name.includes("View")) {
+                        name = name.split("View")[0].trim();
+                    }
+                    
+                    // Remove connection degree from name
+                    if (connectionDegree && name) {
+                        name = name.replace(`• ${connectionDegree}`, '')
+                                .replace(connectionDegree, '').trim();
+                    }
+                    
+                    // Clean up all newlines and extra spaces
+                    if (name) {
                         name = name.replace(/\n/g, ' ')
-                                    .replace(/\s+/g, ' ')
-                                    .replace(/•.*$/, '') // Remove anything after bullet point
-                                    .trim();
-                        
-                        // Only add the profile if we have valid data
-                        if (name) {
-                            profiles.push({
-                                name,
-                                title,
-                                location,
-                                profileUrl,
-                                linkedinId,
-                                connectionDegree: connectionDegree || null
-                            });
-                        }
+                                .replace(/\s+/g, ' ')
+                                .replace(/•.*$/, '') // Remove anything after bullet point
+                                .trim();
+                    }
+                    
+                    // DEBUG: Log the extraction attempt for this profile
+                    console.log(`Extraction attempt ${index+1}: ${name || 'Unnamed'} / ${title || 'No title'} / ${location || 'No location'}`);
+                    
+                    // Only add the profile if we have at least one piece of valid data
+                    if (title || location || profileUrl) {
+                        profiles.push({
+                            name: name || 'Anonymous LinkedIn Member',
+                            title: title || 'No title listed',
+                            location: location || 'No location listed',
+                            profileUrl: profileUrl || '',
+                            linkedinId: linkedinId || '',
+                            connectionDegree: connectionDegree || null,
+                            isAnonymous: name === 'LinkedIn Member' || !name
+                        });
                     }
                 } catch (e) {
                     console.error('Error parsing profile:', e);
@@ -345,33 +436,45 @@ async function extractProfileData(page, onProfileExtracted, options = {}) {
 async function getTotalSearchResultsInfo(page) {
     try {
         return await page.evaluate(() => {
-            // Target the specific div containing the results count
-            const resultsCountDiv = document.querySelector('div[id="MxSzfgMARBWJrAnGrYlV6w=="] h2.t-14');
-            
-            // Also try alternative selectors in case LinkedIn changes the ID
-            const alternativeSelectors = [
+            // Updated selectors for result count in 2024 LinkedIn structure
+            const selectors = [
+                // Current LinkedIn structure 2024
+                'h2.mUkRIIczmilxfKxF3dXujMgFXZ9fFrQXcSW',
+                'div.Iqb2SRNaOlKgFzuHjxk2xaR7RJSQGE2K h2',
+                // Previous selectors as fallback
+                'div[id="MxSzfgMARBWJrAnGrYlV6w=="] h2.t-14',
                 'h2.pb2.t-black--light.t-14',
                 '.search-results__total',
-                '.pb2.t-black--light.t-14 div'
+                '.pb2.t-black--light.t-14 div',
+                // Most generic selector as last resort
+                'h2.t-14'
             ];
             
             let resultText = '';
             
-            // First try the exact div with ID
-            if (resultsCountDiv) {
-                resultText = resultsCountDiv.textContent.trim();
-            } else {
-                // Try alternative selectors if the specific ID isn't found
-                for (const selector of alternativeSelectors) {
-                    const elements = document.querySelectorAll(selector);
-                    for (const el of elements) {
-                        const text = el.textContent.trim();
-                        if (text.includes('result') || text.match(/\d+,?\d*/)) {
-                            resultText = text;
-                            break;
-                        }
+            // Try each selector until we find a matching element with result text
+            for (const selector of selectors) {
+                const elements = document.querySelectorAll(selector);
+                for (const el of elements) {
+                    const text = el.textContent.trim();
+                    if (text.includes('result') || text.match(/\d+,?\d*/)) {
+                        resultText = text;
+                        break;
                     }
-                    if (resultText) break;
+                }
+                if (resultText) break;
+            }
+            
+            // If no element found with the specific selectors, try a more general approach
+            if (!resultText) {
+                // Look for any heading that might contain result count
+                const headings = document.querySelectorAll('h1, h2, h3');
+                for (const heading of headings) {
+                    const text = heading.textContent.trim();
+                    if (text.includes('result') && text.match(/\d+/)) {
+                        resultText = text;
+                        break;
+                    }
                 }
             }
             
@@ -381,6 +484,12 @@ async function getTotalSearchResultsInfo(page) {
                 const numberMatch = resultText.match(/(?:About\s+)?([,\d]+)(?:\+)?\s+results?/i);
                 if (numberMatch) {
                     totalResults = parseInt(numberMatch[1].replace(/,/g, ''), 10);
+                } else {
+                    // Try to find any number in the text
+                    const anyNumber = resultText.match(/(\d[\d,]+)/);
+                    if (anyNumber) {
+                        totalResults = parseInt(anyNumber[1].replace(/,/g, ''), 10);
+                    }
                 }
             }
             
@@ -393,14 +502,14 @@ async function getTotalSearchResultsInfo(page) {
             }
             
             return { 
-                totalResults,
+                totalResults: totalResults || 10, // Default to 10 if we couldn't find the count
                 displayedTotal: totalResults,
-                actuallyAvailable: Math.min(totalResults, linkedInMaxResults)
+                actuallyAvailable: Math.min(totalResults || 10, linkedInMaxResults)
             };
         });
     } catch (error) {
         console.error('Error getting total search results:', error);
-        return { totalResults: 0, displayedTotal: 0, actuallyAvailable: 0 };
+        return { totalResults: 10, displayedTotal: 10, actuallyAvailable: 10 };
     }
 }
 
@@ -426,18 +535,27 @@ async function autoScroll(page) {
         await new Promise((resolve) => {
             let totalHeight = 0;
             const distance = 300;
+            const scrollInterval = 100; // Time between scrolls
+            let scrollAttempts = 0;
+            const maxScrollAttempts = 30; // Limit the number of scroll attempts
+            
             const timer = setInterval(() => {
+                const prevHeight = totalHeight;
                 window.scrollBy(0, distance);
                 totalHeight += distance;
+                scrollAttempts++;
                 
-                if (totalHeight >= document.body.scrollHeight) {
+                // Check if we've reached the bottom or max attempts
+                if ((totalHeight >= document.body.scrollHeight) || 
+                    (scrollAttempts >= maxScrollAttempts)) {
                     clearInterval(timer);
                     resolve();
                 }
-            }, 100);
+            }, scrollInterval);
         });
     });
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    // Additional waiting time after scrolling
+    await new Promise(resolve => setTimeout(resolve, 2000));
 }
 
 // Debug function to understand what's on the page
@@ -448,10 +566,15 @@ async function debugPageContent(page, label) {
         
         // Count elements matching each selector
         const selectors = [
-            'li.AdHMbgDGIMDafLgUlAYlroYNrSpshgCHY',  // New LinkedIn structure
-            'div[data-chameleon-result-urn]',
-            '.entity-result',
-            '.reusable-search__result-container'
+            // Current LinkedIn structure selectors (2024)
+            'li.eFNvtmZzTTJeAFaqYEszRmPedngAGKDE',
+            'div.XbSDRFUSbGBpQPKjsigDankzSjQsnIyFKHI',
+            'ul.mRINvsmBJFpXGsGCEXfkuAyiKqOjbhxMnshkMw',
+            // Detailed element selectors
+            'span.HbdewERYkXYyIwoqJHzosFORfHVGnNOktHA a',
+            '.DOgZOenwMQbHzVlKpcdwpsKlJNhiKoDGZrrVVbuM',
+            'div.wtgFWgtdWSnthiUGZWskuFvgrwFWQdGNoM',
+            'div.IyewRhKoYbBUgqucsJrXLGsvrdIFFXZdHp'
         ];
         
         for (const selector of selectors) {
@@ -459,18 +582,38 @@ async function debugPageContent(page, label) {
             console.log(`Selector "${selector}" found ${count} elements`);
         }
         
-        // Log the HTML structure of the first result for debugging
+        // Log the HTML structure of a few results for debugging
         await page.evaluate(() => {
-            const result = document.querySelector('div[data-chameleon-result-urn]') || 
-                           document.querySelector('.entity-result') ||
-                           document.querySelector('li.AdHMbgDGIMDafLgUlAYlroYNrSpshgCHY');
+            console.log('Document title:', document.title);
+            console.log('URL:', window.location.href);
             
-            if (result) {
-                console.log('First result HTML:', result.outerHTML);
-            } else {
-                console.log('No results found to debug');
-            }
+            // Get the first few results to understand their structure
+            const results = document.querySelectorAll('li.eFNvtmZzTTJeAFaqYEszRmPedngAGKDE');
+            console.log(`Found ${results.length} results with primary selector`);
+            
+            // Extract and log key information from each result for debugging
+            Array.from(results).slice(0, 3).forEach((result, i) => {
+                try {
+                    const name = result.querySelector('.DOgZOenwMQbHzVlKpcdwpsKlJNhiKoDGZrrVVbuM')?.textContent?.trim() || 
+                                result.querySelector('span.HbdewERYkXYyIwoqJHzosFORfHVGnNOktHA a')?.textContent?.trim();
+                    
+                    const title = result.querySelector('div.wtgFWgtdWSnthiUGZWskuFvgrwFWQdGNoM')?.textContent?.trim();
+                    const location = result.querySelector('div.IyewRhKoYbBUgqucsJrXLGsvrdIFFXZdHp')?.textContent?.trim();
+                    
+                    console.log(`Result ${i+1} data:`, {
+                        name: name || 'Not found',
+                        title: title || 'Not found',
+                        location: location || 'Not found'
+                    });
+                    
+                    // Log first 500 chars of HTML for detailed inspection
+                    console.log(`Result ${i+1} HTML:`, result.outerHTML.substring(0, 500) + '...');
+                } catch (e) {
+                    console.error(`Error logging result ${i+1}:`, e);
+                }
+            });
         });
+        
     } catch (error) {
         console.error(`Error during debug (${label}):`, error);
     }
@@ -525,12 +668,12 @@ async function performPeopleSearch(page, searchUrl, maxPages, emitter) {
             console.log(`Navigating to: ${pageUrl}`);
             emitter.emit('progress', { status: 'navigating', message: `Navigating to page ${currentPage}`, page: currentPage });
             
-            // CHANGED: More resilient page navigation approach
+            // IMPROVED: More resilient page navigation approach
             try {
                 // First try with a shorter timeout and domcontentloaded
                 await page.goto(pageUrl, { 
                     waitUntil: 'domcontentloaded',
-                    timeout: 25000 
+                    timeout: 30000 
                 });
             } catch (navError) {
                 console.log('Initial navigation timed out, checking if page loaded anyway...');
@@ -549,21 +692,47 @@ async function performPeopleSearch(page, searchUrl, maxPages, emitter) {
                 console.log('Still on LinkedIn search page, continuing despite timeout');
             }
             
-            // Additional waiting strategies
+            // Additional waiting strategies for new LinkedIn structure
             try {
-                // Wait for search results container with a shorter timeout
+                // Wait for search results container with various selectors
                 await page.waitForSelector([
+                    // New LinkedIn structure selectors 2023/2024
+                    'li.eFNvtmZzTTJeAFaqYEszRmPedngAGKDE',
+                    'div.XbSDRFUSbGBpQPKjsigDankzSjQsnIyFKHI',
+                    'ul.mRINvsmBJFpXGsGCEXfkuAyiKqOjbhxMnshkMw',
+                    // Previous selectors as fallback
                     '.search-results-container',
                     '.reusable-search__result-container',
                     '.search-results',
                     '.scaffold-layout__list'
-                ].join(','), { timeout: 10000 });
+                ].join(','), { timeout: 15000 });
+                
+                console.log('Search results container found');
             } catch (selectorError) {
-                console.log('Search results container not found, will try direct extraction anyway');
+                console.log('Search results container not found, will try direct extraction anyway:', selectorError);
+                
+                // Add debug screenshot
+                await page.screenshot({ path: `debug-search-page-${currentPage}.png` });
+                
+                // Print the page title to help diagnose issues
+                const pageTitle = await page.title();
+                console.log(`Current page title: ${pageTitle}`);
+                
+                // Check if we're on a login page
+                const isLoginPage = await page.evaluate(() => {
+                    return document.body.textContent.includes('Sign in') || 
+                           document.body.textContent.includes('Log in') ||
+                           document.body.textContent.includes('Sign In') ||
+                           document.body.textContent.includes('Log In');
+                });
+                
+                if (isLoginPage) {
+                    throw new Error('Redirected to login page. LinkedIn session may have expired.');
+                }
             }
             
-            // Wait a bit for JavaScript to load more content
-            await delay(5000);
+            // Wait a bit longer for JavaScript to load more content
+            await delay(7000);
             
             // Check if we're redirected to login page (double check)
             const currentUrl = page.url();
@@ -572,6 +741,12 @@ async function performPeopleSearch(page, searchUrl, maxPages, emitter) {
             }
             
             emitter.emit('progress', { status: 'page_loaded', message: `Page ${currentPage} loaded successfully`, page: currentPage, url: currentUrl });
+            
+            // Scroll to ensure all content is loaded
+            await autoScroll(page);
+            
+            // Wait a bit more after scrolling
+            await delay(3000);
             
             emitter.emit('progress', { status: 'extracting', message: `Extracting data from page ${currentPage}`, page: currentPage });
 
@@ -607,11 +782,33 @@ async function performPeopleSearch(page, searchUrl, maxPages, emitter) {
             
             // If we have no results, we've reached the end
             if (hasNoResults) {
+                // IMPROVED: Add debugging to understand why no results were found
+                console.log(`No results found on page ${currentPage}, taking screenshot for debugging`);
+                await page.screenshot({ path: `no-results-page-${currentPage}.png` });
+                
+                // Check the current page HTML for common patterns
+                const pageHtml = await page.content();
+                console.log(`Page HTML length: ${pageHtml.length} characters`);
+                
+                // Log whether certain key elements are present
+                const hasElements = await page.evaluate(() => {
+                    return {
+                        hasNewListItems: document.querySelectorAll('li.eFNvtmZzTTJeAFaqYEszRmPedngAGKDE').length,
+                        hasOldListItems: document.querySelectorAll('li.reusable-search__result-container').length,
+                        hasChameleonResults: document.querySelectorAll('div[data-chameleon-result-urn]').length,
+                        hasAnyListItems: document.querySelectorAll('li').length,
+                        hasSearchContainer: document.querySelectorAll('.search-results-container').length,
+                        hasNoResultsMessage: document.body.textContent.includes('No results found')
+                    };
+                });
+                console.log('Page element presence check:', hasElements);
+                
                 const message = `No more results found after page ${currentPage-1}`;
                 emitter.emit('progress', { 
                     status: 'no_more_results', 
                     message: message,
-                    page: currentPage
+                    page: currentPage,
+                    debugInfo: hasElements
                 });
                 break;
             }
@@ -627,8 +824,8 @@ async function performPeopleSearch(page, searchUrl, maxPages, emitter) {
                 pageResults: profiles
             });
             
-            // Random delay between 2-4 seconds to avoid rate limiting
-            const randomDelay = 2000 + Math.random() * 2000;
+            // Random delay between 3-6 seconds to avoid rate limiting
+            const randomDelay = 3000 + Math.random() * 3000;
             await delay(randomDelay);
             
         } catch (error) {
