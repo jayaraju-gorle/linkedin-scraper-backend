@@ -281,7 +281,10 @@ async function extractProfileData(page, onProfileExtracted, options = {}) {
                             const elements = parent.querySelectorAll(selector);
                             for (const element of elements) {
                                 const text = element.textContent.trim();
-                                if (text && text !== '') return text;
+                                // Skip elements that contain "Status is offline" text
+                                if (text && text !== '' && !text.includes('Status is offline')) {
+                                    return text;
+                                }
                             }
                         }
                         return '';
@@ -323,8 +326,37 @@ async function extractProfileData(page, onProfileExtracted, options = {}) {
                     
                     // EXTRACTION LOGIC
                     
-                    // Extract raw data
-                    let rawName = getText(result, nameSelectors);
+                    // IMPROVED NAME EXTRACTION FOR 2024 LINKEDIN STRUCTURE
+                    
+                    // First, explicitly check for the proper name element - this is more targeted
+                    const getNameDirectly = (parent) => {
+                        // Try direct name extraction methods - focusing on the name link
+                        const nameLink = parent.querySelector('.DOgZOenwMQbHzVlKpcdwpsKlJNhiKoDGZrrVVbuM') || 
+                                        parent.querySelector('span.HbdewERYkXYyIwoqJHzosFORfHVGnNOktHA a');
+                        
+                        if (nameLink) {
+                            // Make sure we don't get the "Status is offline" text that appears in alt text
+                            // Filter out status text and get just the name
+                            const linkText = nameLink.textContent.trim();
+                            if (linkText && !linkText.includes('Status is') && linkText !== '') {
+                                return linkText;
+                            }
+                        }
+                        
+                        // Fall back to other methods if direct extraction didn't work
+                        return null;
+                    };
+                    
+                    // Get name directly with the dedicated function
+                    let rawName = getNameDirectly(result);
+                    
+                    // If direct method failed, try the general text extraction
+                    if (!rawName || rawName === '') {
+                        // Skip nameSelectors that contain "Status is offline" text
+                        rawName = getText(result, nameSelectors);
+                    }
+                    
+                    // Extract other profile data
                     const title = getText(result, titleSelectors);
                     const location = getText(result, locationSelectors);
                     const profileUrl = getUrl(result, urlSelectors);
@@ -344,30 +376,35 @@ async function extractProfileData(page, onProfileExtracted, options = {}) {
                     // Clean the name
                     let name = rawName;
                     
-                    // Check for "LinkedIn Member" - common in your example
-                    if (name === 'LinkedIn Member' || !name) {
-                        // This is a private/anonymous profile
-                        // If we have a title/company, use that to make it more identifiable
+                    // Filter out problematic texts that aren't real names
+                    const invalidNames = ['Status is offline', 'Status is', 'LinkedIn', 'View', 'undefined'];
+                    const isInvalidName = name && invalidNames.some(invalid => name.includes(invalid));
+                    
+                    // Handle LinkedIn Member and other anonymous profiles 
+                    const isAnonymous = !name || name === 'LinkedIn Member' || name === '' || isInvalidName;
+                    
+                    if (isAnonymous) {
+                        // For anonymous profiles, use a consistent naming pattern
                         name = title ? `Anonymous LinkedIn Member (${title})` : 'Anonymous LinkedIn Member';
-                    }
-                    
-                    // Remove "View [name]'s profile"
-                    if (name && name.includes("View")) {
-                        name = name.split("View")[0].trim();
-                    }
-                    
-                    // Remove connection degree from name
-                    if (connectionDegree && name) {
-                        name = name.replace(`• ${connectionDegree}`, '')
-                                .replace(connectionDegree, '').trim();
-                    }
-                    
-                    // Clean up all newlines and extra spaces
-                    if (name) {
+                    } else {
+                        // Clean name only if it's not anonymous (we already set a clean name for anonymous)
+                        
+                        // Remove "View [name]'s profile"
+                        if (name && name.includes("View")) {
+                            name = name.split("View")[0].trim();
+                        }
+                        
+                        // Remove connection degree from name
+                        if (connectionDegree && name) {
+                            name = name.replace(`• ${connectionDegree}`, '')
+                                    .replace(connectionDegree, '').trim();
+                        }
+                        
+                        // Clean up all newlines and extra spaces
                         name = name.replace(/\n/g, ' ')
-                                .replace(/\s+/g, ' ')
-                                .replace(/•.*$/, '') // Remove anything after bullet point
-                                .trim();
+                               .replace(/\s+/g, ' ')
+                               .replace(/•.*$/, '') // Remove anything after bullet point
+                               .trim();
                     }
                     
                     // DEBUG: Log the extraction attempt for this profile
@@ -382,7 +419,7 @@ async function extractProfileData(page, onProfileExtracted, options = {}) {
                             profileUrl: profileUrl || '',
                             linkedinId: linkedinId || '',
                             connectionDegree: connectionDegree || null,
-                            isAnonymous: name === 'LinkedIn Member' || !name
+                            isAnonymous: isAnonymous
                         });
                     }
                 } catch (e) {
@@ -556,67 +593,6 @@ async function autoScroll(page) {
     });
     // Additional waiting time after scrolling
     await new Promise(resolve => setTimeout(resolve, 2000));
-}
-
-// Debug function to understand what's on the page
-async function debugPageContent(page, label) {
-    try {
-        // Take a screenshot
-        await page.screenshot({ path: `debug-${label}.png` });
-        
-        // Count elements matching each selector
-        const selectors = [
-            // Current LinkedIn structure selectors (2024)
-            'li.eFNvtmZzTTJeAFaqYEszRmPedngAGKDE',
-            'div.XbSDRFUSbGBpQPKjsigDankzSjQsnIyFKHI',
-            'ul.mRINvsmBJFpXGsGCEXfkuAyiKqOjbhxMnshkMw',
-            // Detailed element selectors
-            'span.HbdewERYkXYyIwoqJHzosFORfHVGnNOktHA a',
-            '.DOgZOenwMQbHzVlKpcdwpsKlJNhiKoDGZrrVVbuM',
-            'div.wtgFWgtdWSnthiUGZWskuFvgrwFWQdGNoM',
-            'div.IyewRhKoYbBUgqucsJrXLGsvrdIFFXZdHp'
-        ];
-        
-        for (const selector of selectors) {
-            const count = await page.evaluate((sel) => document.querySelectorAll(sel).length, selector);
-            console.log(`Selector "${selector}" found ${count} elements`);
-        }
-        
-        // Log the HTML structure of a few results for debugging
-        await page.evaluate(() => {
-            console.log('Document title:', document.title);
-            console.log('URL:', window.location.href);
-            
-            // Get the first few results to understand their structure
-            const results = document.querySelectorAll('li.eFNvtmZzTTJeAFaqYEszRmPedngAGKDE');
-            console.log(`Found ${results.length} results with primary selector`);
-            
-            // Extract and log key information from each result for debugging
-            Array.from(results).slice(0, 3).forEach((result, i) => {
-                try {
-                    const name = result.querySelector('.DOgZOenwMQbHzVlKpcdwpsKlJNhiKoDGZrrVVbuM')?.textContent?.trim() || 
-                                result.querySelector('span.HbdewERYkXYyIwoqJHzosFORfHVGnNOktHA a')?.textContent?.trim();
-                    
-                    const title = result.querySelector('div.wtgFWgtdWSnthiUGZWskuFvgrwFWQdGNoM')?.textContent?.trim();
-                    const location = result.querySelector('div.IyewRhKoYbBUgqucsJrXLGsvrdIFFXZdHp')?.textContent?.trim();
-                    
-                    console.log(`Result ${i+1} data:`, {
-                        name: name || 'Not found',
-                        title: title || 'Not found',
-                        location: location || 'Not found'
-                    });
-                    
-                    // Log first 500 chars of HTML for detailed inspection
-                    console.log(`Result ${i+1} HTML:`, result.outerHTML.substring(0, 500) + '...');
-                } catch (e) {
-                    console.error(`Error logging result ${i+1}:`, e);
-                }
-            });
-        });
-        
-    } catch (error) {
-        console.error(`Error during debug (${label}):`, error);
-    }
 }
 
 // Helper function to send profile data to client through emitter
