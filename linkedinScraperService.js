@@ -290,11 +290,18 @@ async function extractProfileData(page, onProfileExtracted, options = {}) {
   try {
     // Set defaults
     const settings = {
-      maxPages: 100,  // Default max pages to scrape
-      currentPage: 1, // Current page being processed
-      resultsPerPage: 10, // LinkedIn shows 10 results per page
+      maxPages: 100,         // Default max pages to scrape
+      currentPage: 1,        // Current page being processed
+      resultsPerPage: 10,    // LinkedIn shows 10 results per page
+      cancelCheck: null,     // Function to check if operation is cancelled
       ...options
     };
+
+    // Check for cancellation
+    if (settings.cancelCheck && settings.cancelCheck()) {
+      console.log('Extraction cancelled before starting');
+      return { profiles: [], hasNoResults: true };
+    }
 
     // Wait for search results to load using generic selectors
     const containerSelectors = [
@@ -314,14 +321,27 @@ async function extractProfileData(page, onProfileExtracted, options = {}) {
     console.log(`Total search results: ${totalResultsInfo.totalResults}`);
     
     // Calculate total profiles to extract based on available results and max pages
-    const totalProfilesToExtract = calculateTotalProfilesToExtract(
+    // FIXED calculation here - use maxPages parameter explicitly
+    const totalProfilesToExtract = Math.min(
       totalResultsInfo.totalResults,
-      settings.maxPages,
-      settings.resultsPerPage
+      settings.maxPages * settings.resultsPerPage,
+      1000 // LinkedIn's hard limit
     );
+    
+    // Check for cancellation before scrolling
+    if (settings.cancelCheck && settings.cancelCheck()) {
+      console.log('Extraction cancelled before scrolling');
+      return { profiles: [], hasNoResults: true };
+    }
     
     // Scroll to load all results on current page
     await humanLikeScroll(page);
+    
+    // Check for cancellation after scrolling
+    if (settings.cancelCheck && settings.cancelCheck()) {
+      console.log('Extraction cancelled after scrolling');
+      return { profiles: [], hasNoResults: true };
+    }
     
     // Extract profiles with improved selectors
     const extractedProfiles = await page.evaluate(() => {
@@ -369,30 +389,6 @@ async function extractProfileData(page, onProfileExtracted, options = {}) {
           console.log(`Found ${results.length} results from container approach`);
         }
       }
-      
-      // Helper function to extract text content safely
-      const extractTextContent = (parent, selector, fallbackSelector = null) => {
-        try {
-          // Try primary selector
-          const element = parent.querySelector(selector);
-          if (element && element.textContent) {
-            return element.textContent.trim();
-          }
-          
-          // Try fallback if provided
-          if (fallbackSelector) {
-            const fallbackElement = parent.querySelector(fallbackSelector);
-            if (fallbackElement && fallbackElement.textContent) {
-              return fallbackElement.textContent.trim();
-            }
-          }
-          
-          return "";
-        } catch (e) {
-          console.error("Error extracting text:", e);
-          return "";
-        }
-      };
       
       // IMPROVED: Extract profile name more accurately
       const extractProfileName = (parent) => {
@@ -567,8 +563,14 @@ async function extractProfileData(page, onProfileExtracted, options = {}) {
     
     console.log(`Extracted ${extractedProfiles.length} profiles from page ${settings.currentPage}`);
     
-    // Stream profiles to client as they're processed, with FIXED progress calculation
+    // Stream profiles to client as they're processed
     for (let i = 0; i < extractedProfiles.length; i++) {
+      // Check for cancellation before processing each profile
+      if (settings.cancelCheck && settings.cancelCheck()) {
+        console.log('Extraction cancelled during profile streaming');
+        break;
+      }
+      
       const profile = extractedProfiles[i];
       
       // Calculate absolute profile number across all pages
@@ -582,7 +584,7 @@ async function extractProfileData(page, onProfileExtracted, options = {}) {
         onProfileExtracted({
           profile,
           progress,
-          totalProfiles: totalProfilesToExtract, // This is the FIXED total we use for progress
+          totalProfiles: totalProfilesToExtract,
           profilesScraped,
           totalAvailable: totalResultsInfo.totalResults
         });
@@ -799,7 +801,7 @@ function sendToClient(emitter, data) {
     });
 }
 
-async function performPeopleSearch(page, searchUrl, maxPages, emitter) {
+async function performPeopleSearch(page, searchUrl, maxPages, emitter, isCancelledFn) {
   let allResults = [];
   const numPages = maxPages || 100;
   let consecutiveErrors = 0;
@@ -829,6 +831,12 @@ async function performPeopleSearch(page, searchUrl, maxPages, emitter) {
   }
 
   for (let currentPage = 1; currentPage <= numPages; currentPage++) {
+    // Check for cancellation before processing each page
+    if (isCancelledFn && isCancelledFn()) {
+      console.log(`Scraping cancelled before processing page ${currentPage}`);
+      break;
+    }
+    
     const pageUrl = currentPage === 1 ? searchUrl : `${searchUrl}${searchUrl.includes('?') ? '&' : '?'}page=${currentPage}`;
     try {
       console.log(`Navigating to: ${pageUrl}`);
@@ -840,6 +848,12 @@ async function performPeopleSearch(page, searchUrl, maxPages, emitter) {
         
         // Take a screenshot for debugging
         await page.screenshot({ path: `pre-navigation-page-${currentPage}.png` });
+        
+        // Check for cancellation before high-risk page navigation
+        if (isCancelledFn && isCancelledFn()) {
+          console.log(`Scraping cancelled before high-risk page ${currentPage} navigation`);
+          break;
+        }
         
         // Add some random interactions before navigation
         await page.evaluate(() => {
@@ -857,6 +871,12 @@ async function performPeopleSearch(page, searchUrl, maxPages, emitter) {
         // Wait a bit after the interactions
         await delay(2000 + Math.random() * 1000);
         
+        // Check for cancellation again
+        if (isCancelledFn && isCancelledFn()) {
+          console.log(`Scraping cancelled during high-risk page ${currentPage} preparation`);
+          break;
+        }
+        
         try {
           // Use a longer timeout for problem pages
           console.log(`Navigating to page ${currentPage} with extended timeout...`);
@@ -869,6 +889,12 @@ async function performPeopleSearch(page, searchUrl, maxPages, emitter) {
           
           // Take another screenshot to see what happened
           await page.screenshot({ path: `failed-navigation-page-${currentPage}.png` });
+          
+          // Check for cancellation
+          if (isCancelledFn && isCancelledFn()) {
+            console.log(`Scraping cancelled after failed navigation to page ${currentPage}`);
+            break;
+          }
           
           // Try an alternative navigation approach
           console.log(`Trying alternative navigation for page ${currentPage}...`);
@@ -920,6 +946,12 @@ async function performPeopleSearch(page, searchUrl, maxPages, emitter) {
           waitUntil: 'domcontentloaded',
           timeout: 30000 
         });
+      }
+      
+      // Check for cancellation after navigation
+      if (isCancelledFn && isCancelledFn()) {
+        console.log(`Scraping cancelled after navigating to page ${currentPage}`);
+        break;
       }
       
       // IMPROVED: Check for valid navigation post-load
@@ -984,46 +1016,89 @@ async function performPeopleSearch(page, searchUrl, maxPages, emitter) {
         }
       }
       
+      // Check for cancellation before waiting
+      if (isCancelledFn && isCancelledFn()) {
+        console.log(`Scraping cancelled before waiting for page ${currentPage} content`);
+        break;
+      }
+      
       // Wait longer for JavaScript to load more content
       await delay(7000);
       
+      // Check for cancellation before scrolling
+      if (isCancelledFn && isCancelledFn()) {
+        console.log(`Scraping cancelled before scrolling page ${currentPage}`);
+        break;
+      }
+      
       // Scroll to ensure all content is loaded
       await humanLikeScroll(page);
+      
+      // Check for cancellation after scrolling
+      if (isCancelledFn && isCancelledFn()) {
+        console.log(`Scraping cancelled after scrolling page ${currentPage}`);
+        break;
+      }
       
       // Wait a bit more after scrolling
       await delay(3000);
       
       emitter.emit('progress', { status: 'extracting', message: `Extracting data from page ${currentPage}`, page: currentPage });
 
+      // Calculate expected total items based on maxPages parameter
+      const expectedTotalProfiles = Math.min(1000, maxPages * 10); // LinkedIn limits to 1000 results max
+      
+      // Create a wrapper for the profile extraction callback that fixes the totalProfiles value
+      const fixedProfileCallback = (data) => {
+        // Override the totalProfiles value with our expected total
+        const fixedData = {
+          ...data,
+          totalProfiles: expectedTotalProfiles
+        };
+        
+        // Send profile and progress to client
+        emitter.emit('profile', fixedData.profile);
+        
+        // Send progress information with fixed totalProfiles
+        emitter.emit('progress', { 
+          status: 'extracting_progress', 
+          message: `Extracted profile: ${fixedData.profile.name} (${fixedData.profilesScraped}/${fixedData.totalProfiles}) - ${fixedData.progress}%`,
+          progress: Math.min(100, Math.floor(100 * fixedData.profilesScraped / fixedData.totalProfiles)),
+          profilesScraped: fixedData.profilesScraped,
+          totalProfiles: fixedData.totalProfiles,
+          currentProfile: fixedData.profile.name
+        });
+        
+        console.log(`Extracted profile: ${fixedData.profile.name} (${fixedData.profilesScraped}/${fixedData.totalProfiles}) - ${Math.min(100, Math.floor(100 * fixedData.profilesScraped / fixedData.totalProfiles))}%`);
+      };
+      
       const profiles = [];
+
+      // Pass the cancellation function to extractProfileData
+      const extractOptions = {
+        maxPages: maxPages ? parseInt(maxPages) : 100,
+        currentPage: currentPage,
+        cancelCheck: isCancelledFn
+      };
 
       const result = await extractProfileData(
         page, 
-        // Callback function that receives each profile as it's extracted
-        ({ profile, progress, totalProfiles, profilesScraped }) => {
-          // Add profile to the collection
-          profiles.push(profile);
-          
-          // Send profile and progress to client
-          emitter.emit('profile', profile);
-          
-          // Send progress information
-          emitter.emit('progress', { 
-            status: 'extracting_progress', 
-            message: `Extracted profile: ${profile.name} (${profilesScraped}/${totalProfiles}) - ${progress}%`,
-            progress: progress,
-            profilesScraped: profilesScraped,
-            totalProfiles: totalProfiles,
-            currentProfile: profile.name
-          });
-          
-          console.log(`Extracted profile: ${profile.name} (${profilesScraped}/${totalProfiles}) - ${progress}%`);
+        // Use our wrapper callback
+        (data) => {
+          // Check for cancellation before processing each profile
+          if (isCancelledFn && !isCancelledFn()) {
+            profiles.push(data.profile);
+            fixedProfileCallback(data);
+          }
         },
-        {
-          maxPages: maxPages ? parseInt(maxPages) : 100,
-          currentPage: currentPage
-        }
+        extractOptions
       );
+
+      // Check for cancellation after extraction
+      if (isCancelledFn && isCancelledFn()) {
+        console.log(`Scraping cancelled after extracting profiles from page ${currentPage}`);
+        break;
+      }
 
       const hasNoResults = result.hasNoResults || profiles.length === 0;
       
@@ -1064,6 +1139,12 @@ async function performPeopleSearch(page, searchUrl, maxPages, emitter) {
       // Reset consecutive errors counter on success
       consecutiveErrors = 0;
       
+      // Check for cancellation before waiting for next page
+      if (isCancelledFn && isCancelledFn()) {
+        console.log(`Scraping cancelled after completing page ${currentPage}`);
+        break;
+      }
+      
       // Calculate progressive delay between pages
       const calculateProgressiveDelay = (pageNum) => {
         // Base delay for early pages
@@ -1085,7 +1166,23 @@ async function performPeopleSearch(page, searchUrl, maxPages, emitter) {
       
       const waitTime = calculateProgressiveDelay(currentPage);
       console.log(`Waiting ${Math.round(waitTime)}ms before next page...`);
-      await delay(waitTime);
+      
+      // Use a cancellable delay
+      const startTime = Date.now();
+      while (Date.now() - startTime < waitTime) {
+        // Check for cancellation every 500ms
+        if (isCancelledFn && isCancelledFn()) {
+          console.log(`Scraping cancelled during delay before page ${currentPage + 1}`);
+          break;
+        }
+        await delay(Math.min(500, waitTime - (Date.now() - startTime)));
+      }
+      
+      // Final check for cancellation before moving to next page
+      if (isCancelledFn && isCancelledFn()) {
+        console.log(`Scraping cancelled after delay before page ${currentPage + 1}`);
+        break;
+      }
       
     } catch (error) {
       console.error(`Search failed on page ${currentPage}:`, error);
@@ -1114,27 +1211,52 @@ async function performPeopleSearch(page, searchUrl, maxPages, emitter) {
         break;
       }
       
+      // Check for cancellation before waiting after error
+      if (isCancelledFn && isCancelledFn()) {
+        console.log(`Scraping cancelled after error on page ${currentPage}`);
+        break;
+      }
+      
       // For other pages, wait longer before trying the next page
       await delay(15000);
     }
   }
   
-  emitter.emit('done', { 
-    status: 'done', 
-    message: 'Scraping completed', 
-    resultsCount: allResults.length,
-    results: allResults 
-  });
+  // Only emit done if not cancelled
+  if (!isCancelledFn || !isCancelledFn()) {
+    emitter.emit('done', { 
+      status: 'done', 
+      message: 'Scraping completed', 
+      resultsCount: allResults.length,
+      results: allResults 
+    });
+  }
   
   return allResults;
 }
 
 function searchLinkedInPeople(searchUrl, cookiesString, maxPages) {
     const emitter = new EventEmitter();
+    let isCancelled = false;
+    let browser = null;
+
+    // Listen for cancel event
+    emitter.on('cancel', () => {
+        console.log('Received cancel signal, stopping scraper');
+        isCancelled = true;
+        
+        // Close the browser if it exists
+        if (browser) {
+            try {
+                browser.close().catch(err => console.error('Error closing browser on cancel:', err));
+            } catch (e) {
+                console.error('Error in browser close on cancel:', e);
+            }
+        }
+    });
 
     // Start async operations immediately
     (async () => {
-        let browser;
         try {
             // Launch browser with additional options to avoid detection
             browser = await puppeteer.launch({
@@ -1202,11 +1324,23 @@ function searchLinkedInPeople(searchUrl, cookiesString, maxPages) {
             // Set cookies and validate session
             await setCookies(page, cookiesString, emitter);
             
+            // Check if cancelled after setting cookies
+            if (isCancelled) {
+                console.log('Scraping cancelled after setting cookies');
+                return;
+            }
+            
             // This function will also extract and emit user info
             await validateSession(page, emitter);
             
-            // Now perform the search with valid session
-            await performPeopleSearch(page, searchUrl, maxPages, emitter);
+            // Check if cancelled after validating session
+            if (isCancelled) {
+                console.log('Scraping cancelled after validating session');
+                return;
+            }
+            
+            // Now perform the search with valid session and cancellation check
+            await performPeopleSearch(page, searchUrl, maxPages, emitter, () => isCancelled);
         } catch (error) {
             console.error("Error in searchLinkedInPeople:", error);
             emitter.emit('error', { status: 'error', message: `Error in searchLinkedInPeople: ${error.message}` });

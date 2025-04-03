@@ -79,6 +79,10 @@ app.get('/api/linkedin-search', (req, res) => {
 
     const emitter = searchLinkedInPeople(searchUrl, decodedCookies, maxPages);
 
+    // Store a reference to the emitter for cleanup
+    let scraperEmitter = emitter;
+    let isCancelled = false;
+
     emitter.on('progress', (data) => {
         console.log('Progress:', data);
         safeWrite(`data: ${JSON.stringify(data)}\n\n`);
@@ -97,11 +101,20 @@ app.get('/api/linkedin-search', (req, res) => {
     });
 
     // Handle client disconnect
-    // Clean up heartbeat on client disconnect
     req.on('close', () => {
         clearInterval(heartbeatInterval);
         console.log('Client disconnected');
-        emitter.removeAllListeners();
+        
+        // Set the cancelled flag
+        isCancelled = true;
+        
+        // Emit a cancel event to stop the scraping process
+        if (scraperEmitter) {
+            scraperEmitter.emit('cancel');
+            scraperEmitter.removeAllListeners();
+            scraperEmitter = null;
+        }
+        
         safeEnd();
     });
 });
