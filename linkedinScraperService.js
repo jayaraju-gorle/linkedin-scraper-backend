@@ -123,26 +123,120 @@ async function getCurrentUserInfo(page, emitter) {
 
 // Validate session before proceeding with search
 async function validateSession(page, emitter) {
-    try {
-        // Go to LinkedIn feed page instead of homepage - often more reliable
-        emitter.emit('progress', { status: 'validating', message: 'Validating LinkedIn session' });
-        
-        // Get user info first - this also validates the session
-        const userInfo = await getCurrentUserInfo(page, emitter);
-        
-        // If we got here, session is valid
-        emitter.emit('progress', { 
-            status: 'validated', 
-            message: 'LinkedIn session validated',
-            userInfo: userInfo
-        });
-        
-        return true;
-    } catch (error) {
-        console.error("Session validation error:", error);
-        emitter.emit('error', { status: 'error', message: `Session validation failed: ${error.message}` });
-        throw error;
+  try {
+    // Go to LinkedIn feed page instead of homepage - often more reliable
+    emitter.emit('progress', { status: 'validating', message: 'Validating LinkedIn session' });
+    
+    // Try to load LinkedIn feed
+    await page.goto('https://www.linkedin.com/feed/', { 
+      waitUntil: 'domcontentloaded',
+      timeout: 30000
+    });
+    
+    // Check current URL for redirects to login
+    const currentUrl = page.url();
+    if (currentUrl.includes('/login') || currentUrl.includes('/checkpoint')) {
+      throw new Error('LinkedIn session expired or invalid. Please provide valid cookies.');
     }
+    
+    // Use generic indicators to check login state
+    const isLoggedIn = await page.evaluate(() => {
+      // Generic approach: look for navigation elements that only exist when logged in
+      const hasGlobalNav = !!document.querySelector('header');
+      
+      // Check for feed elements
+      const hasFeed = !!document.querySelector('div[data-test-id="feed-container"]') ||
+                     !!document.querySelector('div[class*="feed-container"]');
+      
+      // Check for profile-related elements (avoid relying on specific class names)
+      const hasProfileElements = !!document.querySelector('a[href*="/in/"]') ||
+                                !!document.querySelector('a[href*="/profile/"]');
+                                
+      // Check for login-specific elements that indicate we're NOT logged in
+      const hasLoginForm = !!document.querySelector('form[action*="login"]') ||
+                          !!document.querySelector('input[name="session_key"]');
+                          
+      // Check page content for logged-out indicators
+      const pageContent = document.body.textContent;
+      const hasLoggedOutText = pageContent.includes('Join now') && 
+                              pageContent.includes('Sign in') &&
+                              !pageContent.includes('Feed');
+      
+      return (hasGlobalNav || hasFeed || hasProfileElements) && !hasLoginForm && !hasLoggedOutText;
+    });
+    
+    if (!isLoggedIn) {
+      throw new Error('Not logged in to LinkedIn. Please provide valid cookies.');
+    }
+    
+    // Get user info with generic selectors
+    const userInfo = await page.evaluate(() => {
+      // Find display name using various generic approaches
+      const findDisplayName = () => {
+        // Try profile images with alt text
+        const profileImages = document.querySelectorAll('img[class*="profile"]');
+        for (const img of profileImages) {
+          if (img.alt && img.alt.length > 3 && !img.alt.includes('LinkedIn')) {
+            return img.alt;
+          }
+        }
+        
+        // Try profile links
+        const profileLinks = document.querySelectorAll('a[href*="/in/"]');
+        for (const link of profileLinks) {
+          if (link.textContent && link.textContent.trim().length > 3 && 
+              !link.textContent.includes('LinkedIn')) {
+            return link.textContent.trim();
+          }
+        }
+        
+        // Look for common profile container patterns
+        const containers = document.querySelectorAll('div[class*="profile"], div[class*="identity"]');
+        for (const container of containers) {
+          if (container.textContent && container.textContent.length > 3) {
+            const text = container.textContent.trim().split('\n')[0];
+            if (text && text.length > 3 && !text.includes('LinkedIn')) {
+              return text;
+            }
+          }
+        }
+        
+        return 'LinkedIn User';
+      };
+      
+      // Find profile URL
+      const findProfileUrl = () => {
+        const profileLinks = document.querySelectorAll('a[href*="/in/"]');
+        for (const link of profileLinks) {
+          // Ensure it's a profile link, not a company or post
+          if (link.href && link.href.includes('/in/') && 
+              !link.href.includes('/company/') && 
+              !link.href.includes('/post/')) {
+            return link.href.split('?')[0]; // Remove query parameters
+          }
+        }
+        return '';
+      };
+      
+      return {
+        displayName: findDisplayName(),
+        profileUrl: findProfileUrl(),
+        loggedIn: true
+      };
+    });
+    
+    emitter.emit('progress', { 
+      status: 'validated', 
+      message: 'LinkedIn session validated',
+      userInfo: userInfo
+    });
+    
+    return true;
+  } catch (error) {
+    console.error("Session validation error:", error);
+    emitter.emit('error', { status: 'error', message: `Session validation failed: ${error.message}` });
+    throw error;
+  }
 }
 
 // Improved helper function for cleaning text content
@@ -194,547 +288,366 @@ function parsePositionAndCompany(title) {
 
 async function extractProfileData(page, onProfileExtracted, options = {}) {
   try {
-      // Set defaults
-      const settings = {
-          maxPages: 100,
-          currentPage: 1,
-          resultsPerPage: 10,
-          ...options
-      };
+    // Set defaults
+    const settings = {
+      maxPages: 100,  // Default max pages to scrape
+      currentPage: 1, // Current page being processed
+      resultsPerPage: 10, // LinkedIn shows 10 results per page
+      ...options
+    };
 
-      // Take a screenshot for debugging
-      await page.screenshot({ path: `debug-page-${settings.currentPage}.png` });
+    // Wait for search results to load using generic selectors
+    const containerSelectors = [
+      'ul[role="list"]',
+      'div[class*="search-results"]',
+      'div[class*="results-container"]',
+      'main div > ul',
+      '.scaffold-layout__list',
+      'div[class*="marvel-srp"]'
+    ];
+    
+    await page.waitForSelector(containerSelectors.join(','), { timeout: 15000 })
+      .catch(() => console.log('Search results container not found with standard selectors, continuing anyway'));
+            
+    // Get total search results info
+    const totalResultsInfo = await getTotalSearchResultsInfo(page);
+    console.log(`Total search results: ${totalResultsInfo.totalResults}`);
+    
+    // Calculate total profiles to extract based on available results and max pages
+    const totalProfilesToExtract = calculateTotalProfilesToExtract(
+      totalResultsInfo.totalResults,
+      settings.maxPages,
+      settings.resultsPerPage
+    );
+    
+    // Add a debugging step to log HTML structure for troubleshooting
+    await page.evaluate(() => {
+      const container = document.querySelector('div[class*="search-results"], div[class*="results-container"], ul[role="list"]');
+      if (container) {
+        console.log('Search results container found:', container.tagName, container.className);
+        const firstResult = container.querySelector('li') || container.firstElementChild;
+        if (firstResult) {
+          console.log('First result structure sample:', firstResult.outerHTML.substring(0, 500) + '...');
+        }
+      } else {
+        console.log('Could not identify a clear search results container');
+      }
+    });
+    
+    // Scroll to load all results on current page
+    await humanLikeScroll(page);
+    
+    // Extract profiles with generic selectors
+    const extractedProfiles = await page.evaluate(() => {
+      const profiles = [];
       
-      // Get total search results info
-      const totalResultsInfo = await getTotalSearchResultsInfo(page);
-      console.log(`Total search results: ${totalResultsInfo.totalResults}`);
+      // Generic selectors for result items - avoid unique class names
+      const resultsSelectors = [
+        'ul[role="list"] > li', // Role-based list items
+        'div[class*="search-results"] > div', // Results container children
+        'div[data-chameleon-result-urn]', // Data attribute selector
+        'div[class*="result-container"]', // Partial class match
+        '.entity-result',
+        'li', // Most generic fallback
+        'div[class*="srp"] li' // Search results page list items
+      ];
       
-      // Calculate total profiles to extract
-      const totalProfilesToExtract = calculateTotalProfilesToExtract(
-          totalResultsInfo.totalResults,
-          settings.maxPages,
-          settings.resultsPerPage
-      );
-      
-      // Use human-like scroll to ensure all content is loaded
-      await humanLikeScroll(page);
-      
-      // Extract profiles based on structural patterns rather than specific classes
-      const extractedProfiles = await page.evaluate(() => {
-          // Text cleaning helper function for browser context
-          const cleanText = (text) => {
-              if (!text) return '';
-              
-              return text
-                  .replace(/\s+/g, ' ')        // Replace multiple spaces, tabs, newlines with a single space
-                  .replace(/^\s+|\s+$/g, '')   // Trim whitespace from start and end
-                  .replace(/\n/g, ' ')         // Replace any remaining newlines with spaces
-                  .replace(/\t/g, ' ')         // Replace any tabs with spaces
-                  .replace(/\s{2,}/g, ' ')     // Make sure there are no double spaces left
-                  .trim();                     // Final trim to ensure no leading/trailing spaces
-          };
-          
-          // Parse position and company from title
-          const parsePositionAndCompany = (title) => {
-              if (!title) return { position: '', company: '' };
-              
-              const cleanTitle = cleanText(title);
-              
-              // Check for pattern "Position at Company"
-              if (cleanTitle.includes(' at ')) {
-                  const parts = cleanTitle.split(' at ');
-                  const position = parts[0].trim();
-                  const company = parts.slice(1).join(' at ').trim();
-                  return { position, company };
-              }
-              
-              // Check for pattern "Position - Company"
-              if (cleanTitle.includes(' - ')) {
-                  const parts = cleanTitle.split(' - ');
-                  const position = parts[0].trim();
-                  const company = parts.slice(1).join(' - ').trim();
-                  return { position, company };
-              }
-              
-              // Check for pattern "Position | Company"
-              if (cleanTitle.includes(' | ')) {
-                  const parts = cleanTitle.split(' | ');
-                  const position = parts[0].trim();
-                  const company = parts.slice(1).join(' | ').trim();
-                  return { position, company };
-              }
-              
-              // If no pattern found, the whole thing is likely the position
-              return { position: cleanTitle, company: '' };
-          };
-          
-          const profiles = [];
-          
-          // Step 1: Find the profile list container using structural hints
-          const findProfileListContainer = () => {
-              // Try to find a list with role="list" first (most reliable)
-              const roleLists = document.querySelectorAll('[role="list"]');
-              for (const list of roleLists) {
-                  if (list.querySelectorAll('li').length > 0) {
-                      return list;
-                  }
-              }
-              
-              // Try to find a ul inside a search container
-              const searchContainers = document.querySelectorAll('div[class*="search-results"], div[class*="results-container"]');
-              for (const container of searchContainers) {
-                  const uls = container.querySelectorAll('ul');
-                  if (uls.length > 0) {
-                      return uls[0];
-                  }
-              }
-              
-              // Last resort: find any ul with multiple li elements that might be profiles
-              const allULs = document.querySelectorAll('ul');
-              for (const ul of allULs) {
-                  const items = ul.querySelectorAll('li');
-                  if (items.length >= 5) { // Assume profile list has multiple items
-                      return ul;
-                  }
-              }
-              
-              return null;
-          };
-          
-          // Find the profile list container
-          const listContainer = findProfileListContainer();
-          if (!listContainer) {
-              console.error('Could not find profile list container');
-              return profiles;
-          }
-          
-          // Get all list items from the container
-          const listItems = listContainer.querySelectorAll('li');
-          console.log(`Found ${listItems.length} potential profile items`);
-          
-          // Process each list item to extract profile information
-          Array.from(listItems).forEach((item, index) => {
-              try {
-                  // STRUCTURAL APPROACH TO PROFILE DATA EXTRACTION
-                  
-                  // 1. Name extraction - using consistent structural patterns
-                  const extractName = (item) => {
-                      // Pattern 1: Look for anchor tags with proper LinkedIn member links
-                      const anchors = item.querySelectorAll('a');
-                      for (const a of anchors) {
-                          // Skip anchors without href or with empty text
-                          if (!a.href || !a.textContent.trim()) continue;
-                          
-                          // Skip anchors that only contain images
-                          if (a.querySelector('img') && !a.textContent.trim()) continue;
-                          
-                          // Find anchors that contain profile links and have text content
-                          if ((a.href.includes('/in/') || a.href.includes('/headless')) && a.textContent.trim()) {
-                              const name = cleanText(a.textContent);
-                              // Clean the name
-                              return name.replace(/Status is offline/i, '')
-                                        .replace(/View\s+profile/i, '')
-                                        .trim();
-                          }
-                      }
-                      
-                      // Pattern 2: Look for prominent text that might be a name
-                      // Names are often in larger or emphasized text and near the top of the item
-                      const possibleNameElements = item.querySelectorAll('span[class*="t-16"], span[class*="t-14"], span[class*="font-bold"], span[class*="name"]');
-                      for (const el of possibleNameElements) {
-                          const text = cleanText(el.textContent);
-                          if (text && !text.includes('Status is') && text.length > 1) {
-                              return text;
-                          }
-                      }
-                      
-                      return null;
-                  };
-                  
-                  // 2. Title extraction - typically follows name in the hierarchy
-                  const extractTitle = (item) => {
-                      // First try: look for small/medium sized text elements after the name
-                      const titleContainers = Array.from(item.querySelectorAll('div, span')).filter(el => {
-                          const text = cleanText(el.textContent);
-                          return text && text.length > 5 && text.length < 100;
-                      });
-                      
-                      for (const container of titleContainers) {
-                          const text = cleanText(container.textContent);
-                          
-                          // Skip location patterns
-                          if (text.match(/\b(India|United States|UAE|Canada|UK|Australia)\b/i) && 
-                              text.length < 25) continue;
-                              
-                          // Check for title patterns (job roles)
-                          const titlePatterns = [
-                              /\b(Software|Sr|Senior|Junior|Lead|Principal|Staff|Associate)\b/i,
-                              /\b(Engineer|Developer|Architect|Manager|Director|VP|CEO|CTO|Founder)\b/i,
-                              /\b(Analyst|Consultant|Specialist|Designer|Officer|Head|Executive)\b/i
-                          ];
-                          
-                          if (titlePatterns.some(pattern => pattern.test(text)) || 
-                              text.includes(' at ') || 
-                              text.includes(' - ') ||
-                              text.includes(' | ')) {
-                              return text;
-                          }
-                      }
-                      
-                      return null;
-                  };
-                  
-                  // 3. Location extraction - typically appears after title
-                  const extractLocation = (item) => {
-                      // Location patterns that identify geographic locations
-                      const locationPatterns = [
-                          /\b(India|United States|UAE|Canada|UK|Australia)\b/i,
-                          /\b(New York|London|Mumbai|Delhi|Bangalore|Hyderabad|Chennai|Pune)\b/i,
-                          /\b(California|Texas|Florida|Michigan|Illinois)\b/i
-                      ];
-                      
-                      // Look for elements containing location text
-                      const allTextElements = item.querySelectorAll('div, span');
-                      for (const el of allTextElements) {
-                          const text = cleanText(el.textContent);
-                          
-                          // Skip empty or very long text
-                          if (!text || text.length > 50) continue;
-                          
-                          // Check if text contains location patterns
-                          if (locationPatterns.some(pattern => pattern.test(text))) {
-                              // If it looks like a pure location (not mixed with other info)
-                              if (!text.includes(' at ') && !text.includes('Engineer') && !text.includes('Manager')) {
-                                  return text;
-                              }
-                          }
-                      }
-                      
-                      // Look for text elements that are likely to be locations (third text block often)
-                      const textBlocks = Array.from(item.querySelectorAll('div')).filter(div => {
-                          const text = cleanText(div.textContent);
-                          return text && text.length > 2 && text.length < 50;
-                      });
-                      
-                      // If we have multiple text blocks, the location is often the last one
-                      if (textBlocks.length >= 3) {
-                          return cleanText(textBlocks[textBlocks.length - 1].textContent);
-                      }
-                      
-                      return null;
-                  };
-                  
-                  // 4. Profile URL extraction - look for proper LinkedIn profile links
-                  const extractProfileUrl = (item) => {
-                      // Look for anchors with /in/ in the URL (real profiles)
-                      const profileAnchors = item.querySelectorAll('a');
-                      for (const a of profileAnchors) {
-                          if (a.href && a.href.includes('/in/')) {
-                              // Clean the URL by removing parameters
-                              return a.href.split('?')[0];
-                          }
-                      }
-                      
-                      // Check for headless profile indicator
-                      if (item.innerHTML.includes('headless')) {
-                          return 'https://www.linkedin.com/search/results/people/headless';
-                      }
-                      
-                      // Check if there's a data attribute that contains profile info
-                      const resultElement = item.querySelector('[data-chameleon-result-urn], [data-entity-urn]');
-                      if (resultElement) {
-                          const urn = resultElement.getAttribute('data-chameleon-result-urn') || 
-                                     resultElement.getAttribute('data-entity-urn');
-                          if (urn && urn.includes('member:')) {
-                              // Extract member ID if possible
-                              const memberId = urn.split('member:')[1];
-                              if (memberId && !memberId.includes('headless')) {
-                                  return `https://www.linkedin.com/in/${memberId}`;
-                              } else {
-                                  return 'https://www.linkedin.com/search/results/people/headless';
-                              }
-                          }
-                      }
-                      
-                      return null;
-                  };
-                  
-                  // 5. Profile image extraction
-                  const extractProfileImage = (item) => {
-                      // Look for img tags with profile photos
-                      const imgElements = item.querySelectorAll('img');
-                      for (const img of imgElements) {
-                          // Skip tiny images that are likely icons
-                          if (img.width < 20 || img.height < 20) continue;
-                          
-                          // Check for common profile image patterns
-                          if (img.src && 
-                              (img.src.includes('profile-displayphoto') || 
-                               img.src.includes('licdn.com/dms/image'))) {
-                              return img.src;
-                          }
-                          
-                          // Check alt text for profile indicators
-                          if (img.alt && 
-                              (img.alt.includes('profile') || 
-                               img.alt.includes('photo') || 
-                               img.alt.includes('picture'))) {
-                              return img.src;
-                          }
-                          
-                          // Check parent element classes
-                          const parent = img.parentElement;
-                          if (parent && 
-                              (parent.className.includes('presence-entity') || 
-                               parent.className.includes('photo') ||
-                               parent.className.includes('image'))) {
-                              return img.src;
-                          }
-                      }
-                      
-                      return null;
-                  };
-                  
-                  // 6. Connection degree extraction
-                  const extractConnectionDegree = (item) => {
-                      // Look for text containing connection degree information
-                      const connectionPatterns = [
-                          /1st\s+degree\s+connection/i,
-                          /2nd\s+degree\s+connection/i,
-                          /3rd\s+degree\s+connection/i,
-                          /\d+th\s+degree\s+connection/i
-                      ];
-                      
-                      const fullText = item.textContent;
-                      for (const pattern of connectionPatterns) {
-                          const match = fullText.match(pattern);
-                          if (match) {
-                              return match[0].trim();
-                          }
-                      }
-                      
-                      return null;
-                  };
-                  
-                  // 7. Mutual connections extraction
-                  const extractMutualConnections = (item) => {
-                      // Look for text mentioning mutual connections
-                      const mutualPattern = /(\d+)\s+mutual\s+connections?/i;
-                      const text = item.textContent;
-                      const match = text.match(mutualPattern);
-                      if (match && match[1]) {
-                          return parseInt(match[1], 10);
-                      }
-                      
-                      return null;
-                  };
-                  
-                  // 8. Active status extraction
-                  const extractActiveStatus = (item) => {
-                      // Check for special status indicators
-                      const activePatterns = [
-                          /#OpenToWork/i,
-                          /Open to work/i,
-                          /#Hiring/i,
-                          /Currently hiring/i
-                      ];
-                      
-                      for (const pattern of activePatterns) {
-                          if (pattern.test(item.textContent)) {
-                              return pattern.source.replace(/[/#i]/g, '').trim();
-                          }
-                      }
-                      
-                      // Check for online status indicator
-                      const presenceIndicator = item.querySelector('.presence-entity__indicator:not(.hidden)');
-                      if (presenceIndicator) {
-                          return 'Online';
-                      }
-                      
-                      return null;
-                  };
-                  
-                  // Extract raw data
-                  const rawName = extractName(item);
-                  const rawTitle = extractTitle(item);
-                  const rawLocation = extractLocation(item);
-                  const profileUrl = extractProfileUrl(item);
-                  const profileImage = extractProfileImage(item);
-                  const connectionDegree = extractConnectionDegree(item);
-                  const mutualConnections = extractMutualConnections(item);
-                  const activeStatus = extractActiveStatus(item);
-                  
-                  // Clean text data
-                  const name = cleanText(rawName);
-                  const title = cleanText(rawTitle);
-                  const location = cleanText(rawLocation);
-                  
-                  // Parse position and company
-                  const { position, company } = parsePositionAndCompany(title);
-                  
-                  // Determine if this is an anonymous profile
-                  const isAnonymous = 
-                      !name || 
-                      name === 'LinkedIn Member' ||
-                      (profileUrl && profileUrl.includes('headless'));
-                  
-                  // Extract LinkedIn ID from profile URL if available
-                  let linkedinId = 'unknown';
-                  if (profileUrl && profileUrl.includes('/in/')) {
-                      linkedinId = profileUrl.split('/in/')[1].split('?')[0];
-                  } else if (profileUrl && profileUrl.includes('headless')) {
-                      linkedinId = 'headless';
-                  }
-                  
-                  // Format the display name
-                  let displayName = name;
-                  if (isAnonymous) {
-                      // Use position if available, otherwise title
-                      const jobInfo = position || title;
-                      displayName = jobInfo ? `Anonymous LinkedIn Member (${jobInfo})` : 'Anonymous LinkedIn Member';
-                  }
-                  
-                  // Only add the profile if we have at least one piece of valid data
-                  if (name || title || location || profileUrl) {
-                      profiles.push({
-                          name: displayName || 'Anonymous LinkedIn Member',
-                          title: title || 'No title listed',
-                          position: position || title || 'No position listed',
-                          company: company || 'Not specified',
-                          location: location || 'No location listed',
-                          profileUrl: profileUrl || '',
-                          profileImage: profileImage || '',
-                          linkedinId: linkedinId,
-                          connectionDegree: connectionDegree || null,
-                          mutualConnections: mutualConnections || 0,
-                          activeStatus: activeStatus || null,
-                          isAnonymous: isAnonymous
-                      });
-                  }
-              } catch (e) {
-                  console.error(`Error parsing profile #${index+1}:`, e);
-              }
-          });
-          
-          return profiles;
-      });
-      
-      console.log(`Extracted ${extractedProfiles.length} profiles from page ${settings.currentPage}`);
-      
-      // Stream profiles to client as they're processed
-      for (let i = 0; i < extractedProfiles.length; i++) {
-          const profile = extractedProfiles[i];
-          
-          // Calculate progress
-          const profilesScraped = (settings.currentPage - 1) * settings.resultsPerPage + (i + 1);
-          const progress = Math.min(100, Math.floor(100 * profilesScraped / totalProfilesToExtract));
-          
-          // Stream profile to client
-          if (onProfileExtracted) {
-              onProfileExtracted({
-                  profile,
-                  progress,
-                  totalProfiles: totalProfilesToExtract,
-                  profilesScraped,
-                  totalAvailable: totalResultsInfo.totalResults
-              });
-          }
-          
-          // Small delay between emissions
-          await new Promise(resolve => setTimeout(resolve, 10));
+      // Find results using the selectors
+      let results = [];
+      for (const selector of resultsSelectors) {
+        results = document.querySelectorAll(selector);
+        if (results.length > 0) {
+          console.log(`Found ${results.length} results using selector: ${selector}`);
+          break;
+        }
       }
       
-      return {
-          profiles: extractedProfiles,
-          hasNoResults: extractedProfiles.length === 0,
-          totalResults: totalResultsInfo.totalResults,
-          progress: Math.min(100, Math.floor(100 * settings.currentPage * settings.resultsPerPage / totalProfilesToExtract))
+      // If no results found with selectors, try the parent container approach
+      if (results.length === 0) {
+        console.log("No results found with direct selectors, trying parent containers");
+        
+        // Look for any list or content container
+        const containers = document.querySelectorAll([
+          'div[class*="search-results"]',
+          'div[class*="results-container"]',
+          'ul[role="list"]',
+          'div[role="list"]',
+          'div[class*="srp"]', // Search results page
+          'main > div > ul' // Common pattern in search interfaces
+        ].join(','));
+        
+        if (containers.length > 0) {
+          const container = containers[0];
+          // Look for list items or direct children that might be results
+          results = container.querySelectorAll('li') || container.querySelectorAll(':scope > div');
+          console.log(`Found ${results.length} results from container approach`);
+        }
+      }
+      
+      // Helper function to extract text content safely
+      const extractTextContent = (parent, selector, fallbackSelector = null) => {
+        try {
+          // Try primary selector
+          const element = parent.querySelector(selector);
+          if (element && element.textContent) {
+            return element.textContent.trim();
+          }
+          
+          // Try fallback if provided
+          if (fallbackSelector) {
+            const fallbackElement = parent.querySelector(fallbackSelector);
+            if (fallbackElement && fallbackElement.textContent) {
+              return fallbackElement.textContent.trim();
+            }
+          }
+          
+          return "";
+        } catch (e) {
+          console.error("Error extracting text:", e);
+          return "";
+        }
       };
+      
+      // Generic function to extract structured text content by position
+      const extractStructuredContent = (parent) => {
+        // Get all text-containing elements
+        const textElements = [];
+        const allElements = parent.querySelectorAll('*');
+        
+        Array.from(allElements).forEach(el => {
+          const directText = Array.from(el.childNodes)
+            .filter(node => node.nodeType === Node.TEXT_NODE)
+            .map(node => node.textContent.trim())
+            .filter(text => text.length > 0);
+            
+          if (directText.length > 0) {
+            textElements.push({
+              element: el,
+              text: directText.join(' ')
+            });
+          }
+        });
+        
+        // Sort by DOM position (top to bottom)
+        textElements.sort((a, b) => {
+          const posA = a.element.getBoundingClientRect();
+          const posB = b.element.getBoundingClientRect();
+          return posA.top - posB.top;
+        });
+        
+        // Filter out very short or empty text
+        const significantTexts = textElements
+          .map(item => item.text)
+          .filter(text => text && text.length > 1 && !text.includes('Status is'));
+        
+        // Return structured content by position
+        return {
+          name: significantTexts[0] || "",
+          title: significantTexts[1] || "",
+          location: significantTexts[2] || ""
+        };
+      };
+      
+      // Generic profile URL extraction
+      const extractProfileUrl = (parent) => {
+        // Look for LinkedIn profile links
+        const links = parent.querySelectorAll('a');
+        for (const link of links) {
+          if (link.href && link.href.includes('/in/')) {
+            return link.href.split('?')[0]; // Remove query parameters
+          }
+        }
+        
+        // Look for headless profile indicator
+        if (parent.getAttribute('data-chameleon-result-urn')?.includes('headless')) {
+          return 'https://www.linkedin.com/search/results/people/headless';
+        }
+        
+        return '';
+      };
+      
+      // Process each result
+      Array.from(results).forEach((result, index) => {
+        try {
+          // Get structured content based on DOM position
+          const content = extractStructuredContent(result);
+          
+          // Get profile URL
+          const profileUrl = extractProfileUrl(result);
+          
+          // Determine if this is an anonymous/headless profile
+          const isAnonymous = content.name.includes('LinkedIn Member') || !content.name;
+          
+          // Clean name
+          let name = content.name;
+          if (isAnonymous) {
+            name = content.title ? `Anonymous LinkedIn Member (${content.title})` : 'Anonymous LinkedIn Member';
+          } else {
+            // Remove connection degree if present
+            name = name.replace(/• \d(?:st|nd|rd|th) degree connection/, '').trim();
+            name = name.replace(/• \d(?:st|nd|rd|th)\+? degree/, '').trim();
+          }
+          
+          // Extract LinkedIn ID from profile URL
+          const linkedinId = profileUrl.includes('/in/') ? 
+            profileUrl.split('/in/')[1]?.split('/')[0] || '' : 
+            'headless';
+          
+          // Extract connection degree
+          let connectionDegree = null;
+          const degreeMatch = result.textContent.match(/(\d)(?:st|nd|rd|th)\+?\s+degree\s+connection/i);
+          if (degreeMatch) {
+            connectionDegree = degreeMatch[0].trim();
+          }
+          
+          // Only add profiles that have at least one piece of useful data
+          if (content.title || content.location || profileUrl) {
+            profiles.push({
+              name: name || 'Anonymous LinkedIn Member',
+              title: content.title || 'No title listed',
+              location: content.location || 'No location listed',
+              profileUrl: profileUrl || '',
+              linkedinId: linkedinId || '',
+              connectionDegree: connectionDegree || null,
+              isAnonymous: isAnonymous
+            });
+          }
+        } catch (e) {
+          console.error('Error parsing profile:', e);
+        }
+      });
+      
+      return profiles;
+    });
+    
+    console.log(`Extracted ${extractedProfiles.length} profiles from page ${settings.currentPage}`);
+    
+    // Stream profiles to client as they're processed
+    for (let i = 0; i < extractedProfiles.length; i++) {
+      const profile = extractedProfiles[i];
+      
+      // Calculate how many profiles we've processed so far
+      const profilesScraped = (settings.currentPage - 1) * settings.resultsPerPage + (i + 1);
+      
+      // Calculate progress percentage
+      const progress = Math.min(100, Math.floor(100 * profilesScraped / totalProfilesToExtract));
+      
+      // Stream the profile to the client with progress information
+      if (onProfileExtracted) {
+        onProfileExtracted({
+          profile,
+          progress,
+          totalProfiles: totalProfilesToExtract,
+          profilesScraped,
+          totalAvailable: totalResultsInfo.totalResults
+        });
+      }
+      
+      // Optional small delay between profile emissions
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    
+    return {
+      profiles: extractedProfiles,
+      hasNoResults: extractedProfiles.length === 0,
+      totalResults: totalResultsInfo.totalResults,
+      progress: Math.min(100, Math.floor(100 * settings.currentPage * settings.resultsPerPage / totalProfilesToExtract))
+    };
   } catch (error) {
-      console.error("Error extracting profile data:", error);
-      return { profiles: [], error: error.message, hasNoResults: true };
+    console.error("Error extracting profile data:", error);
+    return { profiles: [], error: error.message, hasNoResults: true };
   }
 }
 
 // Helper function to get total search results info
 async function getTotalSearchResultsInfo(page) {
-    try {
-        return await page.evaluate(() => {
-            // Updated selectors for result count in 2024 LinkedIn structure
-            const selectors = [
-                // Current LinkedIn structure 2024
-                'h2.mUkRIIczmilxfKxF3dXujMgFXZ9fFrQXcSW',
-                'div.Iqb2SRNaOlKgFzuHjxk2xaR7RJSQGE2K h2',
-                // Previous selectors as fallback
-                'div[id="MxSzfgMARBWJrAnGrYlV6w=="] h2.t-14',
-                'h2.pb2.t-black--light.t-14',
-                '.search-results__total',
-                '.pb2.t-black--light.t-14 div',
-                // Most generic selector as last resort
-                'h2.t-14'
-            ];
-            
-            let resultText = '';
-            
-            // Try each selector until we find a matching element with result text
-            for (const selector of selectors) {
-                const elements = document.querySelectorAll(selector);
-                for (const el of elements) {
-                    const text = el.textContent.trim();
-                    if (text.includes('result') || text.match(/\d+,?\d*/)) {
-                        resultText = text;
-                        break;
-                    }
-                }
-                if (resultText) break;
-            }
-            
-            // If no element found with the specific selectors, try a more general approach
-            if (!resultText) {
-                // Look for any heading that might contain result count
-                const headings = document.querySelectorAll('h1, h2, h3');
-                for (const heading of headings) {
-                    const text = heading.textContent.trim();
-                    if (text.includes('result') && text.match(/\d+/)) {
-                        resultText = text;
-                        break;
-                    }
-                }
-            }
-            
-            // Parse the number from text like "About 13,700,000 results"
-            let totalResults = 0;
-            if (resultText) {
-                const numberMatch = resultText.match(/(?:About\s+)?([,\d]+)(?:\+)?\s+results?/i);
-                if (numberMatch) {
-                    totalResults = parseInt(numberMatch[1].replace(/,/g, ''), 10);
-                } else {
-                    // Try to find any number in the text
-                    const anyNumber = resultText.match(/(\d[\d,]+)/);
-                    if (anyNumber) {
-                        totalResults = parseInt(anyNumber[1].replace(/,/g, ''), 10);
-                    }
-                }
-            }
-            
-            // LinkedIn caps at 1000 viewable results according to their help page
-            const linkedInMaxResults = 1000;
-            
-            // If the total is more than LinkedIn's limit, cap it
-            if (totalResults > linkedInMaxResults) {
-                console.log(`LinkedIn shows ${totalResults} results but only allows viewing ${linkedInMaxResults}`);
-            }
-            
-            return { 
-                totalResults: totalResults || 10, // Default to 10 if we couldn't find the count
-                displayedTotal: totalResults,
-                actuallyAvailable: Math.min(totalResults || 10, linkedInMaxResults)
-            };
-        });
-    } catch (error) {
-        console.error('Error getting total search results:', error);
-        return { totalResults: 10, displayedTotal: 10, actuallyAvailable: 10 };
-    }
+  try {
+    return await page.evaluate(() => {
+      // Function to find results count text using generic approaches
+      const findResultsText = () => {
+        // Approach 1: Look for headings with "results" text
+        const headings = document.querySelectorAll('h1, h2, h3, h4');
+        for (const heading of headings) {
+          const text = heading.textContent.trim();
+          if (text.includes('result') && text.match(/\d+/)) {
+            return text;
+          }
+        }
+        
+        // Approach 2: Look for elements with certain text patterns
+        const resultsPattern = /([,\d]+)\s*results?/i;
+        const allElements = document.querySelectorAll('div, p, span');
+        for (const el of allElements) {
+          const text = el.textContent.trim();
+          if (resultsPattern.test(text) && text.length < 100) {
+            return text;
+          }
+        }
+        
+        // Approach 3: Look for any element with "about X results" text
+        const aboutPattern = /about\s+([,\d]+)\s+results?/i;
+        for (const el of allElements) {
+          const text = el.textContent.trim();
+          if (aboutPattern.test(text)) {
+            return text;
+          }
+        }
+        
+        // Approach 4: Scan the entire page content for results patterns
+        const bodyText = document.body.textContent;
+        const bodyMatch = bodyText.match(/(\d[\d,]*)\s*results?/i);
+        if (bodyMatch) {
+          return `About ${bodyMatch[1]} results`;
+        }
+        
+        // Fallback: check for common phrases in different formats
+        if (bodyText.includes('results')) {
+          const nearbyNumber = bodyText.match(/(\d[\d,]*)\s*(?:of|results?|profiles?)/i);
+          if (nearbyNumber) {
+            return `About ${nearbyNumber[1]} results`;
+          }
+        }
+        
+        return ''; // No results text found
+      };
+      
+      // Get the results text
+      const resultText = findResultsText();
+      
+      // Parse the number from text
+      let totalResults = 0;
+      if (resultText) {
+        // Try to find any number followed by "results"
+        const numberMatch = resultText.match(/([,\d]+)(?:\+)?\s+results?/i);
+        if (numberMatch) {
+          totalResults = parseInt(numberMatch[1].replace(/,/g, ''), 10);
+        } else {
+          // Try to find any number in the text
+          const anyNumber = resultText.match(/(\d[\d,]+)/);
+          if (anyNumber) {
+            totalResults = parseInt(anyNumber[1].replace(/,/g, ''), 10);
+          }
+        }
+      }
+      
+      // LinkedIn caps at 1000 viewable results
+      const linkedInMaxResults = 1000;
+      
+      // If the total is more than LinkedIn's limit, cap it
+      if (totalResults > linkedInMaxResults) {
+        console.log(`LinkedIn shows ${totalResults} results but only allows viewing ${linkedInMaxResults}`);
+      }
+      
+      return {
+        totalResults: totalResults || 10, // Default to 10 if we couldn't find the count
+        displayedTotal: totalResults,
+        actuallyAvailable: Math.min(totalResults || 10, linkedInMaxResults)
+      };
+    });
+  } catch (error) {
+    console.error('Error getting total search results:', error);
+    return { totalResults: 10, displayedTotal: 10, actuallyAvailable: 10 };
+  }
 }
 
 // Calculate total profiles to extract based on requirements
@@ -842,448 +755,333 @@ function sendToClient(emitter, data) {
 }
 
 async function performPeopleSearch(page, searchUrl, maxPages, emitter) {
-    let allResults = [];
-    const numPages = maxPages || 100;
-    let consecutiveErrorCount = 0;
-    const MAX_CONSECUTIVE_ERRORS = 3;
-    let lastSuccessfulPageNumber = 0;
-    
-    // Add randomized user-agent rotation
-    const userAgents = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.4 Safari/605.1.15',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0'
-    ];
+  let allResults = [];
+  const numPages = maxPages || 100;
+  let consecutiveErrors = 0;
+  const maxConsecutiveErrors = 3;
 
-    // Fix URL encoding issues with special characters in the URL
-    try {
-        const url = new URL(searchUrl);
-        
-        // Clean up the search URL to avoid encoding issues
-        for (const [key, value] of url.searchParams.entries()) {
-            // Handle array parameters like currentCompany=["1586"]
-            if (value.includes('[') && value.includes(']')) {
-                try {
-                    // Parse and re-encode properly
-                    const parsedValue = JSON.parse(value.replace(/'/g, '"'));
-                    url.searchParams.set(key, JSON.stringify(parsedValue));
-                } catch (e) {
-                    console.warn(`Failed to parse parameter ${key}=${value}`, e);
-                }
-            }
+  // Fix URL encoding issues with special characters in the URL
+  try {
+    const url = new URL(searchUrl);
+    
+    // Clean up the search URL to avoid encoding issues
+    for (const [key, value] of url.searchParams.entries()) {
+      // Handle array parameters like currentCompany=["1586"]
+      if (value.includes('[') && value.includes(']')) {
+        try {
+          // Parse and re-encode properly
+          const parsedValue = JSON.parse(value.replace(/'/g, '"'));
+          url.searchParams.set(key, JSON.stringify(parsedValue));
+        } catch (e) {
+          console.warn(`Failed to parse parameter ${key}=${value}`, e);
         }
-        
-        searchUrl = url.toString();
-    } catch (e) {
-        console.warn("Error parsing search URL, using as-is:", e);
+      }
     }
-
-    // Helper function for adaptive delays based on page number
-    const getPageDelay = (pageNum) => {
-        // Progressively increase delay as we move through pages
-        const baseDelay = 3000; // 3 seconds
-        const pageMultiplier = Math.min(3, Math.floor(pageNum / 5) + 1); // Increase multiplier every 5 pages, max 3x
-        const randomFactor = 0.5 + Math.random(); // Random factor between 0.5 and 1.5
-        
-        return baseDelay * pageMultiplier * randomFactor;
-    };
     
-    // Helper function to detect LinkedIn's rate limiting or suspicious activity patterns
-    const checkForRateLimiting = async (page) => {
-        const indicators = await page.evaluate(() => {
-            // Check for common rate limiting or security challenge indicators
-            const body = document.body.textContent.toLowerCase();
-            return {
-                captchaPresent: 
-                    document.querySelector('#captcha-internal') !== null || 
-                    document.querySelector('input[name="captcha"]') !== null ||
-                    body.includes('security verification') ||
-                    body.includes('verify it\'s you') ||
-                    body.includes('suspicious activity'),
-                rateLimitMsg: 
-                    body.includes('rate limit') || 
-                    body.includes('try again later') ||
-                    body.includes('too many requests'),
-                maintenanceMsg:
-                    body.includes('maintenance') ||
-                    body.includes('temporarily unavailable'),
-                loginRedirect: 
-                    window.location.href.includes('/login') ||
-                    window.location.href.includes('/checkpoint') ||
-                    document.querySelector('form[action*="login"]') !== null
-            };
+    searchUrl = url.toString();
+  } catch (e) {
+    console.warn("Error parsing search URL, using as-is:", e);
+  }
+
+  for (let currentPage = 1; currentPage <= numPages; currentPage++) {
+    const pageUrl = currentPage === 1 ? searchUrl : `${searchUrl}${searchUrl.includes('?') ? '&' : '?'}page=${currentPage}`;
+    try {
+      console.log(`Navigating to: ${pageUrl}`);
+      emitter.emit('progress', { status: 'navigating', message: `Navigating to page ${currentPage}`, page: currentPage });
+      
+      // Special handling for problematic pages - LinkedIn often blocks after page 6
+      if (currentPage >= 6) {
+        console.log(`Approaching high-risk page ${currentPage}, adding extra precautions...`);
+        
+        // Take a screenshot for debugging
+        await page.screenshot({ path: `pre-navigation-page-${currentPage}.png` });
+        
+        // Add some random interactions before navigation
+        await page.evaluate(() => {
+          // Scroll slightly in random directions to appear more human-like
+          window.scrollBy(0, -100 - Math.random() * 200);
+          
+          // Small pause in JS execution
+          const start = Date.now();
+          while (Date.now() - start < 500) { /* Small deliberate pause */ }
+          
+          // Scroll back
+          window.scrollBy(0, 150 + Math.random() * 100);
         });
         
-        return indicators;
-    };
-    
-    // Add tracking and jitter for page navigation
-    const baseNavigationTimeoutMs = 45000; // 45 seconds
-    let navigationTimeout = baseNavigationTimeoutMs;
-    const cookieRefreshInterval = 5; // Refresh cookies every 5 pages
-    
-    for (let currentPage = 1; currentPage <= numPages; currentPage++) {
-        // Use a more complex page URL construction with slight random parameter variation
-        // Add a timestamp parameter to avoid caching
-        const timestamp = Date.now();
-        const jitter = Math.floor(Math.random() * 100);
-        
-        // Build the URL with proper pagination parameter (LinkedIn uses both page and start)
-        const pageParam = currentPage > 1 ? `page=${currentPage}` : '';
-        const startParam = currentPage > 1 ? `start=${(currentPage-1) * 10}` : '';
-        
-        let pageUrl = searchUrl;
-        
-        // Add pagination parameters
-        if (currentPage > 1) {
-            if (pageUrl.includes('?')) {
-                // Already has query parameters
-                if (!pageUrl.includes('page=') && !pageUrl.includes('start=')) {
-                    pageUrl += `&${pageParam}&${startParam}`;
-                } else if (pageUrl.includes('page=')) {
-                    // Replace existing page parameter
-                    pageUrl = pageUrl.replace(/page=\d+/, pageParam);
-                    if (!pageUrl.includes('start=')) {
-                        pageUrl += `&${startParam}`;
-                    }
-                }
-            } else {
-                // No existing query parameters
-                pageUrl += `?${pageParam}&${startParam}`;
-            }
-        }
-        
-        // Add cache-busting parameters
-        pageUrl += pageUrl.includes('?') ? `&_=${timestamp}&jitter=${jitter}` : `?_=${timestamp}&jitter=${jitter}`;
+        // Wait a bit after the interactions
+        await delay(2000 + Math.random() * 1000);
         
         try {
-            // Randomize user agent for each page
-            const randomUserAgent = userAgents[Math.floor(Math.random() * userAgents.length)];
-            await page.setUserAgent(randomUserAgent);
-            
-            // Refresh cookies periodically if needed
-            if (currentPage > 1 && currentPage % cookieRefreshInterval === 0) {
-                emitter.emit('progress', { 
-                    status: 'refreshing_session', 
-                    message: `Refreshing session on page ${currentPage}` 
-                });
-                
-                // Visit LinkedIn feed briefly to refresh session
-                await page.goto('https://www.linkedin.com/feed/', { 
-                    waitUntil: 'domcontentloaded',
-                    timeout: 20000
-                }).catch(e => console.log('Feed refresh had an error, continuing anyway:', e.message));
-                
-                // Brief delay after refreshing session
-                await delay(1000 + Math.random() * 2000);
-            }
-            
-            // Log navigation and update UI
-            console.log(`Navigating to: ${pageUrl}`);
-            emitter.emit('progress', { 
-                status: 'navigating', 
-                message: `Navigating to page ${currentPage}`, 
-                page: currentPage 
+          // Use a longer timeout for problem pages
+          console.log(`Navigating to page ${currentPage} with extended timeout...`);
+          await page.goto(pageUrl, { 
+            waitUntil: 'domcontentloaded',
+            timeout: 60000 // 60 second timeout for problem pages
+          });
+        } catch (navError) {
+          console.log(`Initial navigation attempt for page ${currentPage} failed:`, navError.message);
+          
+          // Take another screenshot to see what happened
+          await page.screenshot({ path: `failed-navigation-page-${currentPage}.png` });
+          
+          // Try an alternative navigation approach
+          console.log(`Trying alternative navigation for page ${currentPage}...`);
+          try {
+            // Try clicking "Next" button instead of direct navigation
+            const hasNextButton = await page.evaluate(() => {
+              const nextButtons = Array.from(document.querySelectorAll('button, a'))
+                .filter(el => el.textContent.includes('Next') || 
+                             el.textContent.includes('next') ||
+                             el.getAttribute('aria-label')?.includes('Next'));
+                             
+              if (nextButtons.length > 0) {
+                nextButtons[0].click();
+                return true;
+              }
+              return false;
             });
             
-            // Adaptive navigation timeout with jitter
-            navigationTimeout = baseNavigationTimeoutMs + Math.floor(Math.random() * 5000);
-            
-            // More resilient navigation approach with retries
-            let navigationSuccess = false;
-            let navigationAttempts = 0;
-            const maxNavigationAttempts = 3;
-            
-            while (!navigationSuccess && navigationAttempts < maxNavigationAttempts) {
-                navigationAttempts++;
-                
-                try {
-                    // Clear cache and cookies if this is a retry
-                    if (navigationAttempts > 1) {
-                        const client = await page.target().createCDPSession();
-                        await client.send('Network.clearBrowserCache');
-                        emitter.emit('progress', { 
-                            status: 'retry_navigation', 
-                            message: `Retry navigation attempt ${navigationAttempts} for page ${currentPage}` 
-                        });
-                        
-                        // Add a random delay before retry
-                        await delay(2000 + Math.random() * 3000);
-                    }
-                    
-                    // First try with a shorter timeout and domcontentloaded
-                    await page.goto(pageUrl, { 
-                        waitUntil: 'domcontentloaded',
-                        timeout: navigationTimeout 
-                    });
-                    
-                    navigationSuccess = true;
-                } catch (navError) {
-                    console.log(`Navigation attempt ${navigationAttempts} failed:`, navError.message);
-                    
-                    // Check if we're on a valid page despite the error
-                    const url = page.url();
-                    
-                    if (url.includes('/login') || url.includes('/checkpoint')) {
-                        throw new Error('LinkedIn session expired. Please provide new cookies.');
-                    }
-                    
-                    if (url.includes('linkedin.com/search')) {
-                        console.log('Still on LinkedIn search page, continuing despite timeout');
-                        navigationSuccess = true;
-                    }
-                    
-                    // If last attempt and still failed, throw error
-                    if (navigationAttempts >= maxNavigationAttempts && !navigationSuccess) {
-                        throw new Error(`Failed to navigate to page ${currentPage} after ${maxNavigationAttempts} attempts`);
-                    }
-                }
+            if (hasNextButton) {
+              // Wait for navigation to complete
+              await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 })
+                .catch(e => console.log('Navigation timeout after clicking Next, continuing anyway'));
+            } else {
+              // If no Next button, try direct navigation again with minimal wait
+              await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
+                .catch(e => console.log('Retried navigation failed, will check page state anyway'));
             }
-            
-            // Wait for page to settle after navigation
-            await delay(2000 + Math.random() * 1000);
-            
-            // Check for rate limiting or security challenges
-            const rateLimitCheck = await checkForRateLimiting(page);
-            if (rateLimitCheck.captchaPresent) {
-                // Take a screenshot for review
-                await page.screenshot({ path: `captcha-detected-page-${currentPage}.png` });
-                throw new Error('CAPTCHA or security verification detected. Please try again later with new cookies.');
-            }
-            if (rateLimitCheck.rateLimitMsg) {
-                throw new Error('Rate limiting detected. LinkedIn is asking to slow down requests.');
-            }
-            if (rateLimitCheck.maintenanceMsg) {
-                throw new Error('LinkedIn reports maintenance or temporary unavailability.');
-            }
-            if (rateLimitCheck.loginRedirect) {
-                throw new Error('Redirected to login. Session may have expired.');
-            }
-            
-            // Advanced waiting strategy with multiple selector attempts and fallbacks
-            let resultsFound = false;
-            const selectorSets = [
-                // Latest LinkedIn structure selectors (2024)
-                [
-                    'li.eFNvtmZzTTJeAFaqYEszRmPedngAGKDE',
-                    'div.XbSDRFUSbGBpQPKjsigDankzSjQsnIyFKHI',
-                    'ul.mRINvsmBJFpXGsGCEXfkuAyiKqOjbhxMnshkMw'
-                ],
-                // Previous LinkedIn structure selectors
-                [
-                    '.search-results-container',
-                    '.reusable-search__result-container',
-                    '.search-results',
-                    '.scaffold-layout__list'
-                ],
-                // Most generic selectors (last resort)
-                [
-                    'div[data-chameleon-result-urn]',
-                    '.entity-result',
-                    'li.scaffold-layout__list-item'
-                ]
-            ];
-            
-            // Try each selector set with its own timeout
-            for (const selectors of selectorSets) {
-                try {
-                    await page.waitForSelector(selectors.join(','), { 
-                        timeout: 15000
-                    });
-                    resultsFound = true;
-                    console.log('Search results container found');
-                    break;
-                } catch (selectorError) {
-                    console.log(`Selector set not found: ${selectors.join(',')}`);
-                    // Continue to next selector set
-                }
-            }
-            
-            // Even if no selectors matched, we'll still try to extract data
-            if (!resultsFound) {
-                console.log('No results selectors matched, will try direct extraction anyway');
-                await page.screenshot({ path: `no-selectors-page-${currentPage}.png` });
-            }
-            
-            // Wait with dynamic delay - longer for later pages
-            const dynamicDelay = 5000 + (Math.random() * 2000) + (currentPage * 100);
-            await delay(dynamicDelay);
-            
-            // Perform scrolling with more human-like behavior
-            await humanLikeScroll(page);
-            
-            // Additional waiting after scrolling
-            await delay(3000 + Math.random() * 2000);
-            
-            // Check current URL again to ensure we're still on search results
-            const currentUrl = page.url();
-            if (currentUrl.includes('/login') || currentUrl.includes('/checkpoint')) {
-                throw new Error('LinkedIn session expired. Please provide new cookies.');
-            }
-            
-            emitter.emit('progress', { 
-                status: 'page_loaded', 
-                message: `Page ${currentPage} loaded successfully`, 
-                page: currentPage, 
-                url: currentUrl 
-            });
-            
-            // Let the page settle a bit more before extraction
-            await delay(1000 + Math.random() * 1000);
-            
-            emitter.emit('progress', { 
-                status: 'extracting', 
-                message: `Extracting data from page ${currentPage}`, 
-                page: currentPage 
-            });
-
-            const profiles = [];
-
-            const result = await extractProfileData(
-                page, 
-                // Callback function that receives each profile as it's extracted
-                ({ profile, progress, totalProfiles, profilesScraped }) => {
-                    // Add profile to the collection
-                    profiles.push(profile);
-                    
-                    // Send profile and progress to client
-                    sendToClient(emitter, {
-                        type: 'profile',
-                        data: {
-                            profile,
-                            progress,
-                            totalProfiles,
-                            profilesScraped
-                        }
-                    });
-                    
-                    console.log(`Extracted profile: ${profile.name} (${profilesScraped}/${totalProfiles}) - ${progress}%`);
-                },
-                {
-                    maxPages: maxPages ? parseInt(maxPages) : 100,
-                    currentPage: currentPage
-                }
-            );
-
-            const hasNoResults = result.hasNoResults || profiles.length === 0;
-            
-            // Reset consecutive error count since we succeeded
-            consecutiveErrorCount = 0;
-            lastSuccessfulPageNumber = currentPage;
-            
-            // If we have no results, we've reached the end
-            if (hasNoResults) {
-                // Add debugging to understand why no results were found
-                console.log(`No results found on page ${currentPage}, taking screenshot for debugging`);
-                await page.screenshot({ path: `no-results-page-${currentPage}.png` });
-                
-                // Check for "No more results" message or other indicators
-                const endOfResultsCheck = await page.evaluate(() => {
-                    const bodyText = document.body.textContent.toLowerCase();
-                    return {
-                        explicitNoResults: 
-                            bodyText.includes('no results found') || 
-                            bodyText.includes('no matching results') ||
-                            bodyText.includes('we couldn\'t find any results'),
-                        noMoreResults:
-                            bodyText.includes('end of results') ||
-                            bodyText.includes('no more results'),
-                        totalResultsText: document.querySelector('h2.mUkRIIczmilxfKxF3dXujMgFXZ9fFrQXcSW')?.textContent || 
-                                         document.querySelector('div.pb2 h2')?.textContent || ''
-                    };
-                });
-                
-                const message = endOfResultsCheck.explicitNoResults ? 
-                    'No results found for this search' : 
-                    `No more results found after page ${currentPage-1}`;
-                
-                emitter.emit('progress', { 
-                    status: 'no_more_results', 
-                    message: message,
-                    page: currentPage,
-                    debugInfo: endOfResultsCheck
-                });
-                break;
-            }
-            
-            allResults = [...allResults, ...profiles];
-            
-            emitter.emit('progress', { 
-                status: 'extracted', 
-                message: `Extracted ${profiles.length} profiles from page ${currentPage}`,
-                page: currentPage,
-                count: profiles.length,
-                totalSoFar: allResults.length,
-                pageResults: profiles
-            });
-            
-            // Adaptive delay between pages, increasing for later pages
-            const pageDelay = getPageDelay(currentPage);
-            console.log(`Waiting ${pageDelay}ms before next page...`);
-            await delay(pageDelay);
-            
-        } catch (error) {
-            console.error(`Search failed on page ${currentPage}:`, error);
-            consecutiveErrorCount++;
-            
-            // Take screenshot for debugging
-            try {
-                await page.screenshot({ path: `error-page-${currentPage}.png` });
-            } catch (screenshotError) {
-                console.error('Failed to take screenshot:', screenshotError);
-            }
-            
-            emitter.emit('error', { 
-                status: 'error', 
-                message: `Search failed on page ${currentPage}: ${error.message}`, 
-                page: currentPage 
-            });
-            
-            // If we hit too many consecutive errors, stop the search
-            if (consecutiveErrorCount >= MAX_CONSECUTIVE_ERRORS) {
-                emitter.emit('error', {
-                    status: 'stopped',
-                    message: `Stopping search after ${MAX_CONSECUTIVE_ERRORS} consecutive errors`,
-                    lastSuccessfulPage: lastSuccessfulPageNumber
-                });
-                break;
-            }
-            
-            // For specific errors that indicate we should stop immediately
-            if (error.message.includes('CAPTCHA') || 
-                error.message.includes('security verification') ||
-                error.message.includes('rate limiting') ||
-                error.message.includes('session expired')) {
-                emitter.emit('error', {
-                    status: 'blocked',
-                    message: `LinkedIn is blocking further requests: ${error.message}`,
-                    lastSuccessfulPage: lastSuccessfulPageNumber
-                });
-                break;
-            }
-            
-            // Longer delay after an error before trying the next page
-            const errorDelay = 8000 + (Math.random() * 5000);
-            console.log(`Error encountered, waiting ${errorDelay}ms before continuing...`);
-            await delay(errorDelay);
-            
-            // Only break if we fail on the first page or hit max consecutive errors
-            if (currentPage === 1) {
-                break;
-            }
+          } catch (retryError) {
+            console.log(`Alternative navigation also failed:`, retryError.message);
+          }
         }
+        
+        // Verify we're on a search results page regardless of how we got here
+        const isSearchPage = await page.evaluate(() => {
+          return document.body.textContent.includes('results') || 
+                 document.querySelector('div[class*="search-results"]') !== null ||
+                 document.querySelector('ul[role="list"]') !== null;
+        });
+        
+        if (!isSearchPage) {
+          console.error(`Page ${currentPage} does not appear to be a search results page`);
+          await page.screenshot({ path: `not-search-page-${currentPage}.png` });
+          throw new Error(`Failed to navigate to search results page ${currentPage}`);
+        }
+        
+      } else {
+        // Normal navigation for early pages
+        await page.goto(pageUrl, { 
+          waitUntil: 'domcontentloaded',
+          timeout: 30000 
+        });
+      }
+      
+      // IMPROVED: Check for valid navigation post-load
+      const currentUrl = page.url();
+      
+      if (currentUrl.includes('/login') || currentUrl.includes('/checkpoint')) {
+        throw new Error('LinkedIn session expired. Please provide new cookies.');
+      }
+      
+      // Check for rate limiting or blocks
+      const isBlocked = await page.evaluate(() => {
+        return document.body.textContent.includes('unusual activity') || 
+              document.body.textContent.includes('verify you\'re not a robot') ||
+              document.body.textContent.includes('security check') ||
+              document.body.textContent.includes('CAPTCHA');
+      });
+      
+      if (isBlocked) {
+        await page.screenshot({ path: 'rate-limited.png' });
+        throw new Error('LinkedIn has detected unusual activity and blocked access. Try again later with different cookies.');
+      }
+      
+      emitter.emit('progress', { status: 'page_loaded', message: `Page ${currentPage} loaded successfully`, page: currentPage, url: currentUrl });
+      
+      // Wait for search results container with various selectors
+      try {
+        // Wait for search results container with generic selectors
+        const containerSelectors = [
+          'ul[role="list"]',
+          'div[class*="search-results"]',
+          'div[class*="results-container"]',
+          'main div > ul',
+          '.scaffold-layout__list',
+          'div[class*="marvel-srp"]'
+        ];
+        
+        await page.waitForSelector(containerSelectors.join(','), { timeout: 15000 });
+        console.log('Search results container found');
+      } catch (selectorError) {
+        console.log('Search results container not found with standard selectors, continuing anyway:', selectorError);
+        
+        // Check for common issues
+        const pageState = await page.evaluate(() => {
+          return {
+            title: document.title,
+            hasResults: document.body.textContent.includes('results'),
+            hasNoResultsMessage: document.body.textContent.includes('No results found'),
+            bodyTextSample: document.body.textContent.substring(0, 200)
+          };
+        });
+        
+        console.log('Page state check:', pageState);
+        
+        if (pageState.hasNoResultsMessage) {
+          console.log('Explicit "No results found" message detected');
+          emitter.emit('progress', { 
+            status: 'no_more_results', 
+            message: `No more results found after page ${currentPage-1}`,
+            page: currentPage
+          });
+          break;
+        }
+      }
+      
+      // Wait longer for JavaScript to load more content
+      await delay(7000);
+      
+      // Scroll to ensure all content is loaded
+      await humanLikeScroll(page);
+      
+      // Wait a bit more after scrolling
+      await delay(3000);
+      
+      emitter.emit('progress', { status: 'extracting', message: `Extracting data from page ${currentPage}`, page: currentPage });
+
+      const profiles = [];
+
+      const result = await extractProfileData(
+        page, 
+        // Callback function that receives each profile as it's extracted
+        ({ profile, progress, totalProfiles, profilesScraped }) => {
+          // Add profile to the collection
+          profiles.push(profile);
+          
+          // Send profile and progress to client
+          emitter.emit('profile', profile);
+          
+          // Send progress information
+          emitter.emit('progress', { 
+            status: 'extracting_progress', 
+            message: `Extracted profile: ${profile.name} (${profilesScraped}/${totalProfiles}) - ${progress}%`,
+            progress: progress,
+            profilesScraped: profilesScraped,
+            totalProfiles: totalProfiles,
+            currentProfile: profile.name
+          });
+          
+          console.log(`Extracted profile: ${profile.name} (${profilesScraped}/${totalProfiles}) - ${progress}%`);
+        },
+        {
+          maxPages: maxPages ? parseInt(maxPages) : 100,
+          currentPage: currentPage
+        }
+      );
+
+      const hasNoResults = result.hasNoResults || profiles.length === 0;
+      
+      // If we have no results, we've reached the end
+      if (hasNoResults) {
+        // Take a screenshot for debugging
+        await page.screenshot({ path: `no-results-page-${currentPage}.png` });
+        
+        // Check for explicit "no results" message
+        const hasNoResultsMessage = await page.evaluate(() => {
+          return document.body.textContent.includes('No results found') || 
+                 document.body.textContent.includes('couldn\'t find any results');
+        });
+        
+        const message = hasNoResultsMessage 
+          ? `LinkedIn reports no more results found` 
+          : `No more results found after page ${currentPage-1}`;
+        
+        emitter.emit('progress', { 
+          status: 'no_more_results', 
+          message: message,
+          page: currentPage
+        });
+        break;
+      }
+      
+      allResults = [...allResults, ...profiles];
+      
+      emitter.emit('progress', { 
+        status: 'extracted', 
+        message: `Extracted ${profiles.length} profiles from page ${currentPage}`,
+        page: currentPage,
+        count: profiles.length,
+        totalSoFar: allResults.length,
+        pageResults: profiles
+      });
+      
+      // Reset consecutive errors counter on success
+      consecutiveErrors = 0;
+      
+      // Calculate progressive delay between pages
+      const calculateProgressiveDelay = (pageNum) => {
+        // Base delay for early pages
+        const baseDelay = 5000;
+        
+        // Additional delay per page
+        const additionalDelay = 1000;
+        
+        // Extra delay for high-risk pages (typically pages 7-10)
+        const highRiskPages = [7, 8, 9, 10];
+        const highRiskBonus = highRiskPages.includes(pageNum) ? 5000 : 0;
+        
+        // Add randomness
+        const randomFactor = Math.random() * 3000;
+        
+        // Calculate total delay (increases with page number)
+        return baseDelay + (pageNum * additionalDelay) + highRiskBonus + randomFactor;
+      };
+      
+      const waitTime = calculateProgressiveDelay(currentPage);
+      console.log(`Waiting ${Math.round(waitTime)}ms before next page...`);
+      await delay(waitTime);
+      
+    } catch (error) {
+      console.error(`Search failed on page ${currentPage}:`, error);
+      await page.screenshot({ path: `error-page-${currentPage}.png` });
+      
+      consecutiveErrors++;
+      
+      // If we have too many consecutive errors, abort the search
+      if (consecutiveErrors >= maxConsecutiveErrors) {
+        emitter.emit('error', { 
+          status: 'error', 
+          message: `Aborting search after ${maxConsecutiveErrors} consecutive errors. Last error: ${error.message}`, 
+          page: currentPage 
+        });
+        break;
+      }
+      
+      emitter.emit('error', { 
+        status: 'error', 
+        message: `Search failed on page ${currentPage}: ${error.message}`, 
+        page: currentPage 
+      });
+      
+      // Only break if we fail on the first page
+      if (currentPage === 1) {
+        break;
+      }
+      
+      // For other pages, wait longer before trying the next page
+      await delay(15000);
     }
-    
-    emitter.emit('done', { 
-        status: 'done', 
-        message: 'Scraping completed', 
-        resultsCount: allResults.length,
-        results: allResults 
-    });
-    
-    return allResults;
+  }
+  
+  emitter.emit('done', { 
+    status: 'done', 
+    message: 'Scraping completed', 
+    resultsCount: allResults.length,
+    results: allResults 
+  });
+  
+  return allResults;
 }
 
 function searchLinkedInPeople(searchUrl, cookiesString, maxPages) {

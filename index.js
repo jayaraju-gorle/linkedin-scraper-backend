@@ -56,11 +56,23 @@ app.get('/api/linkedin-search', (req, res) => {
         }
     };
 
-    // Set headers for Server-Sent Events
+    // Set headers for SSE with explicit timeouts
     res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
+    
+    // Set longer timeouts for the request and response
+    req.socket.setTimeout(900000); // 10 minutes
+    
+    // Implement heartbeat to keep connection alive
+    const heartbeatInterval = setInterval(() => {
+        if (!isResponseEnded && !res.writableEnded) {
+        safeWrite(':heartbeat\n\n'); // SSE comment line as heartbeat
+        } else {
+        clearInterval(heartbeatInterval);
+        }
+    }, 30000); // Every 30 seconds
     
     // Send initial message to establish connection
     safeWrite('data: {"status":"connected","message":"SSE connection established"}\n\n');
@@ -85,7 +97,9 @@ app.get('/api/linkedin-search', (req, res) => {
     });
 
     // Handle client disconnect
+    // Clean up heartbeat on client disconnect
     req.on('close', () => {
+        clearInterval(heartbeatInterval);
         console.log('Client disconnected');
         emitter.removeAllListeners();
         safeEnd();
