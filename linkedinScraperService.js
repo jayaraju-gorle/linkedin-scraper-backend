@@ -320,28 +320,14 @@ async function extractProfileData(page, onProfileExtracted, options = {}) {
       settings.resultsPerPage
     );
     
-    // Add a debugging step to log HTML structure for troubleshooting
-    await page.evaluate(() => {
-      const container = document.querySelector('div[class*="search-results"], div[class*="results-container"], ul[role="list"]');
-      if (container) {
-        console.log('Search results container found:', container.tagName, container.className);
-        const firstResult = container.querySelector('li') || container.firstElementChild;
-        if (firstResult) {
-          console.log('First result structure sample:', firstResult.outerHTML.substring(0, 500) + '...');
-        }
-      } else {
-        console.log('Could not identify a clear search results container');
-      }
-    });
-    
     // Scroll to load all results on current page
     await humanLikeScroll(page);
     
-    // Extract profiles with generic selectors
+    // Extract profiles with improved selectors
     const extractedProfiles = await page.evaluate(() => {
       const profiles = [];
       
-      // Generic selectors for result items - avoid unique class names
+      // Generic selectors for result items
       const resultsSelectors = [
         'ul[role="list"] > li', // Role-based list items
         'div[class*="search-results"] > div', // Results container children
@@ -372,8 +358,8 @@ async function extractProfileData(page, onProfileExtracted, options = {}) {
           'div[class*="results-container"]',
           'ul[role="list"]',
           'div[role="list"]',
-          'div[class*="srp"]', // Search results page
-          'main > div > ul' // Common pattern in search interfaces
+          'div[class*="srp"]',
+          'main > div > ul'
         ].join(','));
         
         if (containers.length > 0) {
@@ -408,44 +394,106 @@ async function extractProfileData(page, onProfileExtracted, options = {}) {
         }
       };
       
-      // Generic function to extract structured text content by position
-      const extractStructuredContent = (parent) => {
-        // Get all text-containing elements
-        const textElements = [];
-        const allElements = parent.querySelectorAll('*');
+      // IMPROVED: Extract profile name more accurately
+      const extractProfileName = (parent) => {
+        // Look for the main profile name with specific selectors
+        const nameSelectors = [
+          // Target exact LinkedIn Member text without additional content
+          'span.t-16 a', 
+          'a[href*="/in/"] span',
+          '.entity-result__title-text a span',
+          '.entity-result__title-text a',
+          'span[class*="title"] a',
+          '.app-aware-link span',
+          '.app-aware-link'
+        ];
         
-        Array.from(allElements).forEach(el => {
-          const directText = Array.from(el.childNodes)
-            .filter(node => node.nodeType === Node.TEXT_NODE)
-            .map(node => node.textContent.trim())
-            .filter(text => text.length > 0);
+        for (const selector of nameSelectors) {
+          const nameElement = parent.querySelector(selector);
+          if (nameElement && nameElement.textContent.trim()) {
+            // Clean up the name
+            let name = nameElement.textContent.trim();
             
-          if (directText.length > 0) {
-            textElements.push({
-              element: el,
-              text: directText.join(' ')
-            });
+            // Remove connection degree info if present
+            name = name.replace(/\s*•\s*\d(?:st|nd|rd|th)\+? degree(?: connection)?/i, '').trim();
+            
+            // Check if this is "LinkedIn Member" and return just that without additional text
+            if (name.includes('LinkedIn Member')) {
+              return 'LinkedIn Member';
+            }
+            
+            return name;
           }
-        });
+        }
         
-        // Sort by DOM position (top to bottom)
-        textElements.sort((a, b) => {
-          const posA = a.element.getBoundingClientRect();
-          const posB = b.element.getBoundingClientRect();
-          return posA.top - posB.top;
-        });
+        // If we couldn't find the name, return a default
+        return 'LinkedIn Member';
+      };
+      
+      // IMPROVED: Extract profile image
+      const extractProfileImage = (parent) => {
+        // Look for image elements
+        const imgSelectors = [
+          'img[class*="presence-entity__image"]',
+          'img[class*="EntityPhoto-circle"]',
+          'img[class*="profile"]',
+          '.presence-entity img',
+          '.ivm-image-view-model img',
+          '.avatar-image'
+        ];
         
-        // Filter out very short or empty text
-        const significantTexts = textElements
-          .map(item => item.text)
-          .filter(text => text && text.length > 1 && !text.includes('Status is'));
+        for (const selector of imgSelectors) {
+          const imgElement = parent.querySelector(selector);
+          if (imgElement && imgElement.src) {
+            return {
+              src: imgElement.src,
+              alt: imgElement.alt || '',
+              width: imgElement.width || 100,
+              height: imgElement.height || 100
+            };
+          }
+        }
         
-        // Return structured content by position
-        return {
-          name: significantTexts[0] || "",
-          title: significantTexts[1] || "",
-          location: significantTexts[2] || ""
-        };
+        return null;
+      };
+      
+      // Get job title more precisely
+      const extractJobTitle = (parent) => {
+        const titleSelectors = [
+          '.entity-result__primary-subtitle',
+          'div[class*="primary-subtitle"]',
+          'div.t-14.t-black.t-normal',
+          'div[class*="subtitle"]',
+          '.search-result__subtitle'
+        ];
+        
+        for (const selector of titleSelectors) {
+          const element = parent.querySelector(selector);
+          if (element && element.textContent.trim()) {
+            return element.textContent.trim();
+          }
+        }
+        
+        return '';
+      };
+      
+      // Get location more precisely
+      const extractLocation = (parent) => {
+        const locationSelectors = [
+          '.entity-result__secondary-subtitle',
+          'div[class*="secondary-subtitle"]',
+          'div.t-14.t-normal',
+          '.search-result__location'
+        ];
+        
+        for (const selector of locationSelectors) {
+          const element = parent.querySelector(selector);
+          if (element && element.textContent.trim()) {
+            return element.textContent.trim();
+          }
+        }
+        
+        return '';
       };
       
       // Generic profile URL extraction
@@ -466,50 +514,47 @@ async function extractProfileData(page, onProfileExtracted, options = {}) {
         return '';
       };
       
+      // Extract connection degree
+      const extractConnectionDegree = (parent) => {
+        // Try to find the connection info through the profile text
+        const text = parent.textContent;
+        const degreeMatch = text.match(/(\d)(?:st|nd|rd|th)\+?\s+degree(?:\s+connection)?/i);
+        if (degreeMatch) {
+          return degreeMatch[0].trim();
+        }
+        return '';
+      };
+      
       // Process each result
       Array.from(results).forEach((result, index) => {
         try {
-          // Get structured content based on DOM position
-          const content = extractStructuredContent(result);
-          
-          // Get profile URL
+          // Extract profile information
+          const name = extractProfileName(result);
+          const title = extractJobTitle(result);
+          const location = extractLocation(result);
           const profileUrl = extractProfileUrl(result);
+          const connectionDegree = extractConnectionDegree(result);
+          const profileImage = extractProfileImage(result);
           
           // Determine if this is an anonymous/headless profile
-          const isAnonymous = content.name.includes('LinkedIn Member') || !content.name;
-          
-          // Clean name
-          let name = content.name;
-          if (isAnonymous) {
-            name = content.title ? `Anonymous LinkedIn Member (${content.title})` : 'Anonymous LinkedIn Member';
-          } else {
-            // Remove connection degree if present
-            name = name.replace(/• \d(?:st|nd|rd|th) degree connection/, '').trim();
-            name = name.replace(/• \d(?:st|nd|rd|th)\+? degree/, '').trim();
-          }
+          const isAnonymous = name === 'LinkedIn Member';
           
           // Extract LinkedIn ID from profile URL
           const linkedinId = profileUrl.includes('/in/') ? 
             profileUrl.split('/in/')[1]?.split('/')[0] || '' : 
             'headless';
           
-          // Extract connection degree
-          let connectionDegree = null;
-          const degreeMatch = result.textContent.match(/(\d)(?:st|nd|rd|th)\+?\s+degree\s+connection/i);
-          if (degreeMatch) {
-            connectionDegree = degreeMatch[0].trim();
-          }
-          
           // Only add profiles that have at least one piece of useful data
-          if (content.title || content.location || profileUrl) {
+          if (title || location || profileUrl) {
             profiles.push({
-              name: name || 'Anonymous LinkedIn Member',
-              title: content.title || 'No title listed',
-              location: content.location || 'No location listed',
+              name: name || 'LinkedIn Member',
+              title: title || 'No title listed',
+              location: location || 'No location listed',
               profileUrl: profileUrl || '',
               linkedinId: linkedinId || '',
-              connectionDegree: connectionDegree || null,
-              isAnonymous: isAnonymous
+              connectionDegree: connectionDegree || '',
+              isAnonymous: isAnonymous,
+              profileImage: profileImage
             });
           }
         } catch (e) {
@@ -522,14 +567,14 @@ async function extractProfileData(page, onProfileExtracted, options = {}) {
     
     console.log(`Extracted ${extractedProfiles.length} profiles from page ${settings.currentPage}`);
     
-    // Stream profiles to client as they're processed
+    // Stream profiles to client as they're processed, with FIXED progress calculation
     for (let i = 0; i < extractedProfiles.length; i++) {
       const profile = extractedProfiles[i];
       
-      // Calculate how many profiles we've processed so far
+      // Calculate absolute profile number across all pages
       const profilesScraped = (settings.currentPage - 1) * settings.resultsPerPage + (i + 1);
       
-      // Calculate progress percentage
+      // Calculate progress percentage based on total profiles to extract
       const progress = Math.min(100, Math.floor(100 * profilesScraped / totalProfilesToExtract));
       
       // Stream the profile to the client with progress information
@@ -537,7 +582,7 @@ async function extractProfileData(page, onProfileExtracted, options = {}) {
         onProfileExtracted({
           profile,
           progress,
-          totalProfiles: totalProfilesToExtract,
+          totalProfiles: totalProfilesToExtract, // This is the FIXED total we use for progress
           profilesScraped,
           totalAvailable: totalResultsInfo.totalResults
         });

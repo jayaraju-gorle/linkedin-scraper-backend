@@ -63,7 +63,7 @@ app.get('/api/linkedin-search', (req, res) => {
     res.setHeader('X-Accel-Buffering', 'no');
     
     // Set longer timeouts for the request and response
-    req.socket.setTimeout(900000); // 10 minutes
+    req.socket.setTimeout(900000); // 15 minutes
     
     // Implement heartbeat to keep connection alive
     const heartbeatInterval = setInterval(() => {
