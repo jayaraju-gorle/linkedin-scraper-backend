@@ -461,44 +461,66 @@ async function extractProfileData(page, onProfileExtracted, options = {}) {
         return null;
       };
       
-      // Get job title more precisely
-      const extractJobTitle = (parent) => {
-        const titleSelectors = [
-          '.entity-result__primary-subtitle',
-          'div[class*="primary-subtitle"]',
-          'div.t-14.t-black.t-normal',
-          'div[class*="subtitle"]',
-          '.search-result__subtitle'
-        ];
-        
-        for (const selector of titleSelectors) {
-          const element = parent.querySelector(selector);
-          if (element && element.textContent.trim()) {
-            return element.textContent.trim();
-          }
-        }
-        
-        return '';
-      };
-      
-      // Get location more precisely
-      const extractLocation = (parent) => {
-        const locationSelectors = [
-          '.entity-result__secondary-subtitle',
-          'div[class*="secondary-subtitle"]',
-          'div.t-14.t-normal',
-          '.search-result__location'
-        ];
-        
-        for (const selector of locationSelectors) {
-          const element = parent.querySelector(selector);
-          if (element && element.textContent.trim()) {
-            return element.textContent.trim();
-          }
-        }
-        
-        return '';
-      };
+        // Get job title more precisely
+        const extractJobTitle = (parent) => {
+            const titleSelectors = [
+            // More generic selectors that are less likely to change
+            'div[class*="subtitle"]',
+            'div[class*="primary-subtitle"]',
+            '.entity-result__primary-subtitle',
+            'div.t-14.t-black.t-normal',
+            'div.t-14.t-normal'
+            ];
+            
+            for (const selector of titleSelectors) {
+            const element = parent.querySelector(selector);
+            if (element && element.textContent.trim()) {
+                const titleText = element.textContent.trim();
+                
+                // Return the full title text
+                return titleText;
+            }
+            }
+            
+            return '';
+        };
+
+        // Get location more precisely
+        const extractLocation = (parent) => {
+            const locationSelectors = [
+            // Look for the last subtitle-like div that isn't the job title
+            'div.t-14.t-normal:last-of-type',
+            'div[class*="secondary-subtitle"]',
+            '.entity-result__secondary-subtitle',
+            'div[class*="location"]'
+            ];
+            
+            for (const selector of locationSelectors) {
+            const elements = Array.from(parent.querySelectorAll(selector));
+            
+            // If multiple elements exist, take the last one
+            if (elements.length > 1) {
+                const lastElement = elements[elements.length - 1];
+                const locationText = lastElement.textContent.trim();
+                
+                // Ensure we're not returning the same text as the job title
+                const jobTitle = extractJobTitle(parent);
+                if (locationText !== jobTitle) {
+                return locationText;
+                }
+            } else if (elements.length === 1) {
+                const locationText = elements[0].textContent.trim();
+                
+                // Ensure we're not returning the same text as the job title
+                const jobTitle = extractJobTitle(parent);
+                if (locationText !== jobTitle) {
+                return locationText;
+                }
+            }
+            }
+            
+            return '';
+        };
       
       // Generic profile URL extraction
       const extractProfileUrl = (parent) => {
