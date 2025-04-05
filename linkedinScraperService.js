@@ -24,8 +24,8 @@ async function setCookies(page, cookiesString, emitter) {
             
             if (name && value) {
                 cookies.push({ 
-                    name, 
-                    value, 
+                    name: name.trim(), 
+                    value: value.trim(), 
                     domain: '.linkedin.com',
                     path: '/',
                     httpOnly: false,
@@ -40,6 +40,9 @@ async function setCookies(page, cookiesString, emitter) {
         if (!hasLiAt) {
             throw new Error('Missing required LinkedIn authentication cookie (li_at)');
         }
+        
+        // Log cookies being set (omit values for security)
+        console.log("Setting cookies:", cookies.map(c => c.name).join(', '));
         
         await page.setCookie(...cookies);
         console.log("Cookies set successfully");
@@ -416,6 +419,11 @@ async function extractProfileData(page, onProfileExtracted, options = {}) {
             // Check if this is "LinkedIn Member" and return just that without additional text
             if (name.includes('LinkedIn Member')) {
               return 'LinkedIn Member';
+            }
+            
+            // Strip any "View profile" text that might be in the name
+            if (name.includes('View')) {
+              name = name.split('View')[0].trim();
             }
             
             return name;
@@ -1023,7 +1031,7 @@ async function performPeopleSearch(page, searchUrl, maxPages, emitter, isCancell
       }
       
       // Wait longer for JavaScript to load more content
-      await delay(7000);
+      await delay(15000);
       
       // Check for cancellation before scrolling
       if (isCancelledFn && isCancelledFn()) {
@@ -1056,20 +1064,33 @@ async function performPeopleSearch(page, searchUrl, maxPages, emitter, isCancell
           totalProfiles: expectedTotalProfiles
         };
         
+        // Clean the name to be consistent
+        let cleanName = fixedData.profile.name;
+        // Remove any "View profile" text that might be in the name
+        if (cleanName.includes("View")) {
+          cleanName = cleanName.split("View")[0].trim();
+        }
+        
+        // Correct the progress percentage (not 100% for all profiles)
+        const correctedProgress = Math.min(100, Math.floor(100 * fixedData.profilesScraped / fixedData.totalProfiles));
+        
         // Send profile and progress to client
         emitter.emit('profile', fixedData.profile);
         
         // Send progress information with fixed totalProfiles
         emitter.emit('progress', { 
           status: 'extracting_progress', 
-          message: `Extracted profile: ${fixedData.profile.name} (${fixedData.profilesScraped}/${fixedData.totalProfiles}) - ${fixedData.progress}%`,
-          progress: Math.min(100, Math.floor(100 * fixedData.profilesScraped / fixedData.totalProfiles)),
+          message: `Extracted profile: ${cleanName} (${fixedData.profilesScraped}/${fixedData.totalProfiles}) - ${correctedProgress}%`,
+          progress: correctedProgress,
           profilesScraped: fixedData.profilesScraped,
           totalProfiles: fixedData.totalProfiles,
-          currentProfile: fixedData.profile.name
+          currentProfile: cleanName,
+          // Add profile URL and image to the progress message
+          profileUrl: fixedData.profile.profileUrl || "",
+          profileImage: fixedData.profile.profileImage || null
         });
         
-        console.log(`Extracted profile: ${fixedData.profile.name} (${fixedData.profilesScraped}/${fixedData.totalProfiles}) - ${Math.min(100, Math.floor(100 * fixedData.profilesScraped / fixedData.totalProfiles))}%`);
+        console.log(`Extracted profile: ${cleanName} (${fixedData.profilesScraped}/${fixedData.totalProfiles}) - ${correctedProgress}%`);
       };
       
       const profiles = [];
